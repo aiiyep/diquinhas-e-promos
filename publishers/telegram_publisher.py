@@ -73,10 +73,13 @@ def _build_html_message(product: dict[str, Any]) -> str:
 
     link = product.get("link_produto") or product.get("link") or "https://exemplo.com"
 
+    # Só exibe o "De:" riscado quando há desconto real (preço original maior que o promocional)
+    linha_de = f"❌ De: <s>R$ {old_price}</s>\n" if old_price != promo_price else ""
+
     return (
         f"{emojis} <b>{title}</b>\n"
         f"⭐ Avaliação: <b>{rating_str}/5</b>\n\n"
-        f"❌ De: <s>R$ {old_price}</s>\n"
+        f"{linha_de}"
         f"✅ <b>Por: R$ {promo_price}</b>\n\n"
         f"🛒 <a href=\"{link}\">Compre aqui com desconto</a>"
     )
