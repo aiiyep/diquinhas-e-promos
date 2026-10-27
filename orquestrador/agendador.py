@@ -60,29 +60,111 @@ db = HistoricoDB()
 # Contadores de rotação para variar os produtos a cada disparo dentro do mesmo Sprint
 _sprint_counters: dict[str, int] = defaultdict(int)
 
-# Pool de buscas rotativas por nicho para evitar repetição em disparos consecutivos
+# Pool amplo de buscas rotativas por nicho (20+ subcategorias/marcas por tópico)
+# Combinado com paginação automática (páginas 0, 1, 2 = 60 itens por termo),
+# garante mais de 1.200 a 1.600 produtos únicos por tópico sem repetição em 14 dias.
 NICHO_ROTATION_QUERIES: dict[str, list[str]] = {
     "rosto_e_corpo": [
-        "Base Liquida Payot",
-        "Gloss Labial Payot",
-        "Gel Limpeza Facial Monange",
-        "Agua Micelar L Oreal",
+        "Base Liquida",
+        "Gloss Labial",
+        "Gel Limpeza Facial",
+        "Agua Micelar",
+        "Corretivo Liquido",
+        "Blush Compacto",
+        "Mascara de Cilios",
+        "Batom Matte",
+        "Serum Facial Vitamina C",
+        "Hidratante Facial",
+        "Protetor Solar Facial",
+        "Iluminador Facial",
+        "Po Translucido",
+        "Lip Tint",
+        "Hidratante Corporal",
+        "Esfoliante Corporal",
+        "Demaquilante Bifasico",
+        "Bruma Fixadora Maquiagem",
+        "Delineador Liquido",
+        "Paleta de Sombras",
+        "Sabonete Liquido Facial",
+        "Oleo Corporal Amendoas",
+        "Primer Facial",
+        "Lapis de Olho",
+        "Contorno Facial",
+        "Tonico Adstringente Facial",
+        "Creme Hidratante Maos",
+        "Balsamo Labial Hidratante",
     ],
     "unhas": [
         "Esmalte Risque",
         "Esmalte Impala",
-        "Base Fortalecedora Unhas Risque",
+        "Base Fortalecedora Unhas",
+        "Esmalte Dailus",
+        "Esmalte Colorama",
+        "Esmalte Anita",
+        "Top Coat Extra Brilho",
+        "Oleo Secante Unhas",
+        "Removedor de Esmalte",
+        "Alicate de Cuticula Mundial",
+        "Cera Nutritiva Unhas Cuticulas",
+        "Esmalte Vult",
+        "Base Cetim Unhas",
+        "Kit Manicure Pedicure",
+        "Lixa de Unha",
+        "Gotas Secantes Unhas",
+        "Esmalte Efeito Gel",
+        "Amolecedor de Cuticula",
     ],
     "moda": [
-        "Vestido Feminino Midi",
-        "Vestido Longo Festa",
+        "Vestido Midi Feminino",
+        "Conjunto Feminino Alfaiataria",
+        "Calca Jeans Wide Leg",
+        "Blusa Canelada Feminina",
+        "Vestido Longo Feminino",
+        "Saia Midi Feminina",
+        "Blazer Feminino",
+        "Calca Pantalona Feminina",
         "Vestido Curto Feminino",
+        "Macacao Feminino Longo",
+        "Camisa Social Feminina",
+        "Short Alfaiataria Feminino",
+        "Cropped Feminino",
+        "Calca Alfaiataria Feminina",
+        "Cardigan Tricot Feminino",
+        "Saia Curta Feminina",
+        "Macaquinho Feminino",
+        "Jaqueta Jeans Feminina",
+        "Body Feminino",
+        "Short Jeans Feminino",
+        "Blusa Manga Curta Feminina",
+        "Vestido Canelado",
+        "Conjunto Moletinho Feminino",
+        "Regata Feminina",
     ],
     "cabelo": [
         "Mascara Capilar Wella",
-        "Condicionador Elseve Oleo Extraordinario",
-        "Coloracao Amend Magnific",
-        "Coloracao Haskell Excllusiv",
+        "Condicionador Elseve",
+        "Mascara Capilar Lola",
+        "Oleo Capilar Reparador",
+        "Mascara Capilar Haskell",
+        "Leave In Protetor Termico",
+        "Shampoo Wella Professionals",
+        "Mascara Capilar Amend",
+        "Creme de Pentear Cachos",
+        "Tonico Capilar Antiqueda",
+        "Mascara Capilar Inoar",
+        "Ampola Capilar Hidratacao",
+        "Shampoo Elseve",
+        "Mascara Capilar Salon Line",
+        "Oleo de Argan Capilar",
+        "Mascara Capilar Dabelle",
+        "Ativador de Cachos",
+        "Kit Shampoo e Condicionador",
+        "Gelatina Capilar Cachos",
+        "Spray Protetor Termico Capilar",
+        "Mascara Matizadora Loiras",
+        "Queratina Liquida Capilar",
+        "Condicionador Haskell",
+        "Leave In Elseve Cicatri Renov",
     ],
     # K-Beauty desativado temporariamente a pedido do usuário
 }
@@ -110,10 +192,17 @@ async def disparar_oferta(nicho: str) -> bool:
     logger.info("Extraindo 1 produto de %s", nicho)
 
     categoria = NICHO_TO_CATEGORY.get(nicho.strip().lower(), nicho.strip().lower())
-    idx = _sprint_counters[categoria]
+    if categoria == "k-beauty":
+        logger.info("Nicho 'K-Beauty' está pausado temporariamente; ignorando disparo.")
+        return False
+
+    # Combina o contador em memória com o total já salvo no SQLite para manter a rotação mesmo após reboot do servidor
+    historico_count = db.contar_postagens_nicho(nicho)
+    idx = historico_count + _sprint_counters[categoria]
     _sprint_counters[categoria] += 1
 
     formatter = PromoFormatter()
+    containers = ML_TOPIC_CONTAINERS.get(categoria)
 
     try:
         if categoria == "beleza_premium" and SHOPEE_CSV_DIR.exists():
@@ -124,52 +213,68 @@ async def disparar_oferta(nicho: str) -> bool:
                 categoria="beleza_premium",
                 emojis="💎✨💄",
             )
-            produtos: list[ProdutoOferta] = [ProdutoOferta(**d) for d in raw_dicts]
-        else:
-            ml_ext = MercadoLivreExtractor()
-            queries = NICHO_ROTATION_QUERIES.get(categoria, [nicho])
-            query_escolhida = queries[idx % len(queries)]
-            emojis = TOPIC_EMOJIS.get(categoria, "✨💖🔥")
-
-            produtos = ml_ext.buscar_ofertas(
-                query=query_escolhida,
-                categoria=categoria,
-                emojis=emojis,
-                limit=20,
-            )
-
-        if not produtos:
-            logger.warning("Nenhum produto encontrado para o nicho '%s'.", nicho)
+            produtos_candidatos: list[ProdutoOferta] = [ProdutoOferta(**d) for d in raw_dicts]
+            for produto in produtos_candidatos:
+                if not db.foi_postado_recentemente(produto.id):
+                    oferta_afiliada = formatter.aplicar_afiliado(produto.model_dump())
+                    sucesso = await publish_product_to_telegram(oferta_afiliada)
+                    if sucesso:
+                        db.registrar_postagem(produto.id, nicho)
+                        return True
+                    break
+            logger.warning("Nenhum produto inédito de '%s' pôde ser publicado.", nicho)
             return False
 
-        containers = ML_TOPIC_CONTAINERS.get(categoria)
+        ml_ext = MercadoLivreExtractor()
+        queries = NICHO_ROTATION_QUERIES.get(categoria, [nicho])
+        emojis = TOPIC_EMOJIS.get(categoria, "✨💖🔥")
 
-        publicado = False
-        for produto in produtos:
-            if not db.foi_postado_recentemente(produto.id):
-                dados_produto = produto.model_dump()
-                if containers and categoria != "beleza_premium":
-                    dados_produto["link_produto"] = containers[idx % len(containers)]
+        # Percorre as subcategorias rotativas e avança páginas automaticamente (pág 0, 1, 2)
+        # caso os primeiros 20 resultados da subcategoria já tenham sido postados nos últimos 14 dias.
+        max_queries_to_try = min(len(queries), 4)
+        max_pages_per_query = 3
 
-                oferta_afiliada = formatter.aplicar_afiliado(dados_produto)
-                sucesso = await publish_product_to_telegram(oferta_afiliada)
-                if sucesso:
-                    db.registrar_postagem(produto.id, nicho)
-                    publicado = True
-                break
-            else:
-                logger.info(
-                    "Produto '%s' (%s) já postado nos últimos 14 dias; buscando próximo da lista...",
-                    produto.id,
-                    produto.titulo[:40],
-                )
+        for q_offset in range(max_queries_to_try):
+            query_escolhida = queries[(idx + q_offset) % len(queries)]
+            for page in range(max_pages_per_query):
+                try:
+                    produtos = ml_ext.buscar_ofertas(
+                        query=query_escolhida,
+                        categoria=categoria,
+                        emojis=emojis,
+                        limit=20,
+                        page=page,
+                    )
+                except ValueError:
+                    break
 
-        if not publicado:
-            logger.warning(
-                "Nenhum produto inédito pôde ser publicado para o nicho '%s' neste ciclo.",
-                nicho,
-            )
-        return publicado
+                if not produtos:
+                    break
+
+                for produto in produtos:
+                    if not db.foi_postado_recentemente(produto.id):
+                        dados_produto = produto.model_dump()
+                        if containers and categoria != "beleza_premium":
+                            dados_produto["link_produto"] = containers[idx % len(containers)]
+
+                        oferta_afiliada = formatter.aplicar_afiliado(dados_produto)
+                        sucesso = await publish_product_to_telegram(oferta_afiliada)
+                        if sucesso:
+                            db.registrar_postagem(produto.id, nicho)
+                            return True
+                        return False
+                    else:
+                        logger.info(
+                            "Produto '%s' (%s) já postado nos últimos 14 dias; buscando próximo da lista...",
+                            produto.id,
+                            produto.titulo[:40],
+                        )
+
+        logger.warning(
+            "Nenhum produto inédito pôde ser publicado para o nicho '%s' neste ciclo.",
+            nicho,
+        )
+        return False
     except Exception as exc:
         logger.error("Erro ao disparar oferta do nicho '%s': %s", nicho, exc)
         return False

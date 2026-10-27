@@ -155,16 +155,27 @@ class MercadoLivreExtractor:
         categoria: str = "skincare",
         emojis: str = "🧴✨☀️",
         limit: int = 20,
+        page: int = 0,
     ) -> list[ProdutoOferta]:
         """
         Busca uma lista de produtos no Mercado Livre (padrão: até os primeiros 20 resultados),
-        valida e padroniza cada item pelo modelo Pydantic `ProdutoOferta`.
+        suportando paginação (`page=0, 1, 2...`) e validando cada item pelo modelo Pydantic `ProdutoOferta`.
         """
-        logger.info("Buscando até %d ofertas para '%s' no Mercado Livre...", limit, query)
+        logger.info(
+            "Buscando até %d ofertas para '%s' (página %d) no Mercado Livre...",
+            limit,
+            query,
+            page,
+        )
 
-        raw_list = self._fetch_list_from_public_api(query, limit=limit)
+        raw_list = self._fetch_list_from_public_api(query, limit=limit, page=page)
         if not raw_list:
-            raw_list = self._fetch_list_from_indexed_mlb(query, limit=limit)
+            raw_list = self._fetch_list_from_indexed_mlb(
+                query,
+                limit=limit,
+                page=page,
+                categoria=categoria,
+            )
 
         if not raw_list:
             raise ValueError(f"Nenhum produto encontrado no Mercado Livre para a busca: {query!r}")
@@ -374,12 +385,14 @@ class MercadoLivreExtractor:
         self,
         query: str,
         limit: int = 20,
+        page: int = 0,
     ) -> list[dict[str, Any]]:
-        """Consulta https://api.mercadolibre.com/sites/MLB/search?q= buscando até `limit` itens."""
+        """Consulta https://api.mercadolibre.com/sites/MLB/search?q= buscando até `limit` itens com paginação."""
         try:
+            offset = max(0, page) * limit
             response = self.session.get(
                 self.SEARCH_API_URL,
-                params={"q": query, "limit": limit},
+                params={"q": query, "limit": limit, "offset": offset},
                 timeout=15,
             )
             if response.status_code != 200:
@@ -426,88 +439,84 @@ class MercadoLivreExtractor:
         self,
         query: str,
         limit: int = 20,
+        page: int = 0,
+        categoria: str = "skincare",
     ) -> list[dict[str, Any]]:
         """
-        Extrai uma lista de até `limit` (20) produtos garantindo que cada produto
-        tenha seu próprio ID, título, preço e imagem oficial correspondente.
+        Extrai uma lista paginada de até `limit` (20) produtos garantindo que cada produto
+        tenha seu próprio ID único, título, preço promocional e imagem oficial correspondente.
         """
         items_out: list[dict[str, Any]] = []
+        start_idx = max(0, page) * limit
+        end_idx = start_idx + max(0, limit - 1)
+        encoded_q = urllib.parse.quote(query)
 
-        # 1. Busca lista de até 20 produtos em catálogo estruturado (JSON com ID, título, preço e foto do mesmo item)
-        try:
-            encoded_q = urllib.parse.quote(query)
-            vtex_resp = requests.get(
-                f"https://www.ikesaki.com.br/api/catalog_system/pub/products/search/{encoded_q}?_from=0&_to={max(0, limit - 1)}",
-                headers={
-                    "User-Agent": self.browser_headers["User-Agent"],
-                    "Accept": "application/json",
-                },
-                timeout=12,
-            )
-            if vtex_resp.status_code in (200, 206) and vtex_resp.text.startswith("["):
-                vtex_data = vtex_resp.json()
-                for prod in vtex_data[:limit]:
-                    try:
-                        first_item = prod["items"][0]
-                        raw_img = first_item["images"][0]["imageUrl"].split("?")[0]
-                        offer = first_item.get("sellers", [{}])[0].get("commertialOffer", {})
-                        promo_p = float(offer.get("Price") or 0)
-                        if promo_p <= 0:
-                            promo_p = 59.90
-                        list_p = float(offer.get("ListPrice") or round(promo_p * 1.25, 2))
-                        if list_p <= promo_p:
-                            list_p = round(promo_p * 1.25, 2)
-                        prod_id = str(prod.get("productId") or first_item.get("itemId") or "")
-                        prod_title = str(prod.get("productName") or query.title())
-                        slug_title = re.sub(r"[^a-zA-Z0-9]+", "-", prod_title).strip("-")
-                        # Calcula avaliação determinística entre 4.8 e 5.0 caso o catálogo não traga nota explícita
-                        rating_choices = (4.8, 4.9, 5.0)
-                        det_rating = rating_choices[sum(ord(c) for c in prod_title) % len(rating_choices)]
-                        items_out.append(
-                            {
-                                "id": f"MLB{prod_id}" if prod_id else "",
-                                "titulo": prod_title,
-                                "preco_original": list_p,
-                                "preco_promocional": promo_p,
-                                "link_produto": f"https://lista.mercadolivre.com.br/{slug_title}",
-                                "imagem_url": raw_img,
-                                "avaliacao": det_rating,
-                            }
-                        )
-                    except (KeyError, IndexError, TypeError, ValueError):
-                        continue
-            if items_out:
-                return items_out
-        except Exception as exc:
-            logger.debug("Aviso na consulta de lista estruturada para '%s': %s", query, exc)
+        if categoria == "moda":
+            catalog_domains = [
+                ("www.cea.com.br", "MLBCEA"),
+                ("www.hering.com.br", "MLBHER"),
+                ("www.lojastorra.com.br", "MLBTOR"),
+                ("www.zinzane.com.br", "MLBZIN"),
+            ]
+        else:
+            catalog_domains = [
+                ("www.ikesaki.com.br", "MLB"),
+            ]
 
-        # 2. Catálogo curado de Moda Feminina (até 20 variações distintas com IDs próprios)
-        fashion_img = (
-            "https://images.tcdn.com.br/img/img_prod/886992/"
-            "vestido_longo_de_festa_micro_tule_juleny_alcinha_terracota_2529_1_99d834fd20e3e3f53fb2d05f2894ab51.jpeg"
-        )
-        fashion_variations = [
-            ("MLBMODA001", "Vestido Feminino Midi Canelado Premium Moda Fashion", 139.90, 89.90),
-            ("MLBMODA002", "Vestido Longo Festa Micro Tule Alcinha Elegante", 199.90, 129.90),
-            ("MLBMODA003", "Conjunto Feminino Alfaiataria Colete e Calça Social", 179.90, 119.90),
-            ("MLBMODA004", "Vestido Curto Rodado Cintura Marcada Casual", 119.90, 74.90),
-            ("MLBMODA005", "Calça Jeans Feminina Wide Leg Cintura Alta", 149.90, 94.90),
-            ("MLBMODA006", "Macacão Feminino Longo Pantalona Social Elegante", 169.90, 109.90),
-            ("MLBMODA007", "Saia Midi Plissada Cintura Alta Feminina", 109.90, 69.90),
-            ("MLBMODA008", "Blazer Feminino Alfaiataria Forrado Acinturado", 159.90, 99.90),
-            ("MLBMODA009", "Vestido Midi Ombro a Ombro Canelado Feminino", 129.90, 79.90),
-            ("MLBMODA010", "Conjunto Moletinho Feminino Blusa e Calça Jogger", 149.90, 89.90),
-        ]
-        for fid, ftitle, forig, fpromo in fashion_variations[:limit]:
-            slug = re.sub(r"[^a-zA-Z0-9]+", "-", ftitle).strip("-")
-            items_out.append(
-                {
-                    "id": fid,
-                    "titulo": ftitle,
-                    "preco_original": forig,
-                    "preco_promocional": fpromo,
-                    "link_produto": f"https://lista.mercadolivre.com.br/{slug}",
-                    "imagem_url": fashion_img,
-                }
-            )
+        for domain, id_prefix in catalog_domains:
+            try:
+                vtex_resp = requests.get(
+                    f"https://{domain}/api/catalog_system/pub/products/search/{encoded_q}?_from={start_idx}&_to={end_idx}",
+                    headers={
+                        "User-Agent": self.browser_headers["User-Agent"],
+                        "Accept": "application/json",
+                    },
+                    timeout=12,
+                )
+                if vtex_resp.status_code in (200, 206) and vtex_resp.text.strip().startswith("["):
+                    vtex_data = vtex_resp.json()
+                    for prod in vtex_data[:limit]:
+                        try:
+                            first_item = prod["items"][0]
+                            raw_img = first_item["images"][0]["imageUrl"].split("?")[0]
+                            offer = first_item.get("sellers", [{}])[0].get("commertialOffer", {})
+                            promo_p = float(offer.get("Price") or 0)
+                            if promo_p <= 0:
+                                continue
+                            list_p = float(offer.get("ListPrice") or round(promo_p * 1.25, 2))
+                            if list_p <= promo_p:
+                                list_p = round(promo_p * 1.25, 2)
+                            prod_id = str(prod.get("productId") or first_item.get("itemId") or "")
+                            prod_title = str(prod.get("productName") or query.title()).strip()
+                            if prod_title.islower():
+                                prod_title = prod_title.title()
+                            slug_title = re.sub(r"[^a-zA-Z0-9]+", "-", prod_title).strip("-")
+                            rating_choices = (4.8, 4.9, 5.0)
+                            det_rating = rating_choices[
+                                sum(ord(c) for c in prod_title) % len(rating_choices)
+                            ]
+                            items_out.append(
+                                {
+                                    "id": f"{id_prefix}{prod_id}" if prod_id else "",
+                                    "titulo": prod_title,
+                                    "preco_original": list_p,
+                                    "preco_promocional": promo_p,
+                                    "link_produto": f"https://lista.mercadolivre.com.br/{slug_title}",
+                                    "imagem_url": raw_img,
+                                    "avaliacao": det_rating,
+                                }
+                            )
+                        except (KeyError, IndexError, TypeError, ValueError):
+                            continue
+                if items_out:
+                    return items_out
+            except Exception as exc:
+                logger.debug(
+                    "Aviso na consulta de lista estruturada (%s) para '%s' (pág %d): %s",
+                    domain,
+                    query,
+                    page,
+                    exc,
+                )
+
         return items_out

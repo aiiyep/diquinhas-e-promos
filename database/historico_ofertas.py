@@ -84,3 +84,11 @@ class HistoricoDB:
             nicho,
             agora_iso,
         )
+
+    def contar_postagens_nicho(self, nicho: str) -> int:
+        """Retorna o total de postagens registradas para um nicho (mantém rotação contínua após reboot)."""
+        query = "SELECT COUNT(*) FROM ofertas_enviadas WHERE LOWER(nicho) = LOWER(?);"
+        with self._conectar() as conn:
+            cursor = conn.execute(query, (str(nicho).strip(),))
+            row = cursor.fetchone()
+        return int(row[0]) if row and row[0] else 0
