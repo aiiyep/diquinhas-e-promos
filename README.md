@@ -1,75 +1,84 @@
 # 🛍️ Diquinhas & Promos — Affiliate Bot
 
-Arquitetura base modular e desacoplada para extração, formatação e publicação automatizada de ofertas (Moda, Beleza e Tecnologia) integrando **Amazon**, **Shopee** e **Mercado Livre** com disparo para **Telegram (Tópicos/Threads)** e **Twitter/X**.
+Bot de afiliados que busca ofertas de beleza e moda no **Mercado Livre** e na **Shopee** e publica cada uma no tópico (thread) correspondente de um supergrupo do **Telegram**, em horários agendados.
 
 ---
 
-## 📂 Estrutura do Projeto
+## 🔁 Como funciona
 
 ```text
-diquinhas-e-promos/
-├── extractors/              # Conectores isolados por loja + contratos Pydantic
-│   ├── __init__.py
-│   ├── base.py              # BaseExtractor (ABC), ProductOffer, Category, Marketplace
-│   ├── amazon.py            # AmazonExtractor (PA-API 5.0)
-│   ├── shopee.py            # ShopeeExtractor (GraphQL Affiliate API)
-│   └── mercado_livre.py     # MercadoLivreExtractor (MLB REST API)
-├── formatters/              # Montagem de copy, comparativo de preços e tracking links
-│   ├── __init__.py
-│   └── promo_formatter.py   # PromoFormatter e FormattedPromotion
-├── publishers/              # Clientes de publicação para redes sociais/mensageiros
-│   ├── __init__.py
-│   ├── base.py              # BasePublisher (ABC)
-│   ├── telegram_publisher.py# Suporte a message_thread_id (Tópicos)
-│   └── twitter_publisher.py # Integração Tweepy API v2
-├── .env.example             # Mapeamento de variáveis de ambiente e credenciais
-├── main.py                  # Orquestrador central (Extrai -> Formata -> Publica)
-├── requirements.txt         # Dependências do projeto
-└── README.md
+APScheduler (cron, America/Sao_Paulo)
+  └─ disparar_oferta(nicho)                 orquestrador/agendador.py
+       ├─ Mercado Livre: catálogo oficial → API de busca pública      extractors/mercadolivre.py
+       │   (rotaciona palavras-chave por nicho e pagina 0, 1, 2)
+       ├─ Shopee: CSVs do painel de afiliados em data/shopee/<marca>/  extractors/shopee.py
+       ├─ HistoricoDB: pula produtos postados nos últimos 14 dias       database/historico_ofertas.py
+       ├─ PromoFormatter: injeta parâmetros de afiliado no link        formatters/promo_formatter.py
+       └─ publish_product_to_telegram: foto + legenda HTML no tópico   publishers/telegram_publisher.py
 ```
 
----
+- Preço "De" e nota ⭐ só aparecem quando vêm de dados reais da loja.
+- Se um envio falha, o bot tenta o próximo produto (até 3 falhas seguidas).
+- Os horários dos blocos ficam na tabela `BLOCOS` em `orquestrador/agendador.py`.
 
-## 🐧 Como Rodar no Fedora Linux
+## 📂 Estrutura
 
-### 1. Instalar pacotes base do Python (caso não estejam instalados)
-```bash
-sudo dnf update -y
-sudo dnf install -y python3 python3-pip python3-virtualenv
+```text
+config.py                  # carrega o .env e define constantes compartilhadas
+models.py                  # ProdutoOferta (modelo Pydantic comum a todas as lojas)
+main.py                    # CLI
+orquestrador/agendador.py  # blocos de horário e lógica de disparo
+extractors/                # mercadolivre.py, shopee.py
+formatters/                # links de afiliado
+publishers/                # Telegram
+database/                  # SQLite de deduplicação e histórico de disparos
+painel/                    # painel web (status, disparos, postagens, log)
+data/shopee/<marca>/*.csv  # exportações da Shopee Afiliados
+tests/                     # pytest
 ```
 
-### 2. Acessar o diretório do projeto
-```bash
-cd diquinhas-e-promos
-```
+## ▶️ Como rodar
 
-### 3. Criar e ativar o ambiente virtual (`venv`)
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### 4. Atualizar o `pip` e instalar as dependências
-```bash
-pip install --upgrade pip
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env               # preencha token, chat_id, thread_ids e credenciais do ML
 ```
 
-### 5. Configurar as variáveis de ambiente
-Copie o arquivo de exemplo `.env.example` para `.env` e preencha suas chaves de API:
+| Comando | O que faz |
+| --- | --- |
+| `python main.py` | Inicia o agendador e fica rodando |
+| `python main.py --check-schedule` | Lista os próximos disparos e encerra |
+| `python main.py --test-nicho Moda` | Faz um disparo imediato de um nicho |
+| `python main.py --run-all-now` | Publica um lote (Shopee + containers ML) agora |
+
+## 📊 Painel web
+
+Com o bot rodando (`python main.py`), um painel fica disponível em `http://127.0.0.1:8080`. Ele mostra:
+- há quanto tempo o bot está no ar;
+- o próximo disparo e os seguintes;
+- o resultado de cada disparo;
+- as últimas postagens;
+- o log, com filtro e busca.
+
+O painel só escuta no próprio servidor. Para abrir do seu PC, crie um túnel SSH e acesse `http://localhost:8080`:
+
 ```bash
-cp .env.example .env
-nano .env
+ssh -N -L 8080:localhost:8080 root@IP_DO_DROPLET
 ```
 
-### 6. Executar o orquestrador principal
+Porta e ativação podem ser configuradas em `PAINEL_PORTA` e `PAINEL_ATIVO` no `.env`.
+
+## 🧪 Testes
+
 ```bash
-python3 main.py
+pip install -r requirements-dev.txt
+pytest
 ```
 
----
+## ➕ Adicionar um nicho
 
-## 🔌 Como Adicionar ou Remover Lojas
-Graças ao contrato `BaseExtractor` em `extractors/base.py`:
-- **Remover uma loja**: Basta comentar ou remover a instância correspondente na lista `extractors` dentro de `build_orchestrator()` em `main.py`.
-- **Adicionar uma nova loja (ex.: Magalu, AliExpress)**: Crie uma nova subclasse de `BaseExtractor` implementando `fetch_offers()` e `_normalize_payload()` retornando objetos `ProductOffer`, e registre-a na lista `extractors` do `main.py`.
+1. Adicione as palavras-chave em `NICHO_ROTATION_QUERIES` e o mapeamento em `NICHO_TO_CATEGORY`.
+2. Adicione a linha do horário em `BLOCOS`.
+3. Configure `THREAD_ID_<NICHO>` no `.env` e o mapeamento em `_resolve_thread_id`.

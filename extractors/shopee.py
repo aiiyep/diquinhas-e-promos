@@ -1,39 +1,33 @@
 import csv
 import hashlib
-import json
+from html import unescape
 import logging
-import os
+from pathlib import Path
 import re
 import time
-import urllib.parse
-from html import unescape
-from pathlib import Path
 from typing import Any, Optional
 
 import requests
-from dotenv import load_dotenv
 
-from extractors.mercadolivre import ProdutoOferta
-
-load_dotenv()
+from config import env
+from models import ProdutoOferta
 
 logger = logging.getLogger("diquinhas_e_promos.shopee")
+
+_OG_IMAGE_PATTERNS = (
+    re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+    re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', re.IGNORECASE),
+)
 
 
 class ShopeeExtractor:
     """
     Extrator de ofertas da Shopee com suporte a:
     1. Leitura de arquivos .csv exportados da Shopee Afiliados (para o tópico 'beleza_premium').
-    2. Extração por link direto ou busca indexada / GraphQL API.
+    2. Foto oficial do anúncio via og:image do link do produto.
     """
 
     GRAPHQL_URL = "https://open-api.affiliate.shopee.com.br/graphql"
-    PUBLIC_INDEX_URL = "https://br.search.yahoo.com/search"
-
-    DEFAULT_SHOPEE_IMAGE = (
-        "https://ikesaki.vteximg.com.br/arquivos/ids/385092/"
-        "Kit-Wella-Professionals-Invigo-Nutri-Enrich-Shampoo---Condicionador---Mascara_29567x_img01.jpg"
-    )
 
     def __init__(
         self,
@@ -41,31 +35,9 @@ class ShopeeExtractor:
         app_secret: Optional[str] = None,
         affiliate_id: Optional[str] = None,
     ) -> None:
-        load_dotenv()
-        self.app_id = (app_id or os.getenv("SHOPEE_APP_KEY", "")).strip()
-        self.app_secret = (app_secret or os.getenv("SHOPEE_APP_SECRET", "")).strip()
-        self.affiliate_id = (affiliate_id or os.getenv("SHOPEE_AFFILIATE_ID", "")).strip()
-
-        self.browser_headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                "image/avif,image/webp,image/apng,*/*;q=0.8"
-            ),
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1",
-        }
+        self.app_id = (app_id or env("SHOPEE_APP_KEY")).strip()
+        self.app_secret = (app_secret or env("SHOPEE_APP_SECRET")).strip()
+        self.affiliate_id = (affiliate_id or env("SHOPEE_AFFILIATE_ID")).strip()
 
     @staticmethod
     def _parse_price(raw_val: Any) -> Optional[float]:
@@ -114,12 +86,15 @@ class ShopeeExtractor:
         categoria: str = "beleza_premium",
         emojis: str = "💎✨💄",
         limit: Optional[int] = None,
+        resolver_imagens: bool = True,
     ) -> list[dict[str, Any]]:
         """
         Lê um arquivo .csv de produtos da Shopee, mapeia dinamicamente as colunas
         (título, preço original/desconto, link de afiliado/produto, imagem),
         ordena pelos mais vendidos, valida com ProdutoOferta e retorna uma lista de
         dicionários prontos para o tópico 'beleza_premium'.
+        Linhas sem preço são descartadas. Com `resolver_imagens=False` a foto só é
+        buscada depois, para o produto escolhido (`buscar_imagem_oficial`).
         """
         path = Path(csv_path)
         if not path.exists():
@@ -207,23 +182,24 @@ class ShopeeExtractor:
                     or normalized_row.get("id")
                 )
 
-                if not titulo or not link or link in seen_links:
+                promo_price = self._parse_price(raw_promo)
+                if not titulo or not link or not promo_price or link in seen_links:
                     continue
                 seen_links.add(link)
 
-                promo_price = self._parse_price(raw_promo) or 99.90
+                # Preço "De" só vem de dado real do CSV (coluna própria ou % de desconto informado)
                 orig_price = self._parse_price(raw_orig)
                 if not orig_price or orig_price <= promo_price:
                     disc_pct = self._parse_price(raw_discount)
-                    if disc_pct and 0 < disc_pct < 95:
-                        orig_price = round(promo_price / (1.0 - (disc_pct / 100.0)), 2)
-                    else:
-                        orig_price = round(promo_price * 1.25, 2)
+                    orig_price = (
+                        round(promo_price / (1.0 - (disc_pct / 100.0)), 2)
+                        if disc_pct and 0 < disc_pct < 95
+                        else None
+                    )
 
-                sales_int = self._parse_sales(raw_sales)
                 parsed_rating = self._parse_price(raw_rating)
-                if not parsed_rating or not (0 < parsed_rating <= 5.0):
-                    parsed_rating = 4.9 if sales_int >= 50 else 4.8
+                if parsed_rating and not (0 < parsed_rating <= 5.0):
+                    parsed_rating = None
 
                 candidatos.append(
                     {
@@ -232,8 +208,8 @@ class ShopeeExtractor:
                         "preco_original": orig_price,
                         "preco_promocional": promo_price,
                         "link_produto": link,
-                        "imagem_raw": imagem,
-                        "sales": sales_int,
+                        "imagem_url": imagem,
+                        "sales": self._parse_sales(raw_sales),
                         "avaliacao": parsed_rating,
                     }
                 )
@@ -245,31 +221,11 @@ class ShopeeExtractor:
 
         ofertas: list[dict[str, Any]] = []
         for cand in candidatos:
-            imagem_raw = cand["imagem_raw"]
-            imagem_final = imagem_raw if (imagem_raw and imagem_raw.startswith("http")) else None
-            if not imagem_final:
-                indexed = self._fetch_from_indexed_shopee(
-                    cand["titulo"], preferred_url=cand["link_produto"]
-                )
-                imagem_final = indexed["imagem_url"] if indexed else self.DEFAULT_SHOPEE_IMAGE
-
-            oferta_obj = ProdutoOferta(
-                id=cand["id"],
-                titulo=cand["titulo"],
-                preco_original=cand["preco_original"],
-                preco_promocional=cand["preco_promocional"],
-                link_produto=cand["link_produto"],
-                imagem_url=imagem_final,
-                avaliacao=cand["avaliacao"],
-                categoria=categoria,
-                emojis=emojis,
-                loja="shopee",
-            )
-            item_dict = oferta_obj.model_dump()
-            item_dict["categoria"] = categoria
-            item_dict["emojis"] = emojis
-            item_dict["loja"] = "shopee"
-            ofertas.append(item_dict)
+            cand.pop("sales")
+            oferta_obj = ProdutoOferta(**cand, categoria=categoria, emojis=emojis, loja="shopee")
+            if not oferta_obj.imagem_url and resolver_imagens:
+                oferta_obj.imagem_url = self.buscar_imagem_oficial(oferta_obj.link_produto)
+            ofertas.append(oferta_obj.model_dump())
 
         logger.info(
             "Extraídas %d ofertas do CSV '%s' para a categoria '%s'.",
@@ -285,6 +241,7 @@ class ShopeeExtractor:
         por_marca: int = 1,
         categoria: str = "beleza_premium",
         emojis: str = "💎✨💄",
+        resolver_imagens: bool = True,
     ) -> list[dict[str, Any]]:
         """
         Percorre todas as subpastas de marcas dentro de `base_dir` (ex: wella, amend,
@@ -316,6 +273,7 @@ class ShopeeExtractor:
                     categoria=categoria,
                     emojis=emojis,
                     limit=por_marca * 2,
+                    resolver_imagens=resolver_imagens,
                 )
                 for item in itens:
                     chave = item["titulo"].strip().lower()
@@ -336,6 +294,28 @@ class ShopeeExtractor:
         )
         return todas_ofertas
 
+    def buscar_imagem_oficial(self, product_url: str) -> Optional[str]:
+        """Extrai a foto oficial do próprio anúncio da Shopee via OpenGraph (og:image)."""
+        if not product_url.startswith("http"):
+            return None
+        try:
+            resp = requests.get(
+                product_url,
+                headers={"User-Agent": "WhatsApp/2.23.20.0"},
+                timeout=10,
+                allow_redirects=True,
+            )
+            if resp.status_code == 200:
+                for pattern in _OG_IMAGE_PATTERNS:
+                    match = pattern.search(resp.text)
+                    if match:
+                        candidate_img = unescape(match.group(1)).strip()
+                        if candidate_img.startswith("http"):
+                            return candidate_img
+        except Exception as exc:
+            logger.debug("Aviso ao ler og:image do link Shopee %s: %s", product_url, exc)
+        return None
+
     def _has_valid_graphql_credentials(self) -> bool:
         return bool(
             self.app_id
@@ -355,122 +335,4 @@ class ShopeeExtractor:
                 f"Timestamp={timestamp}, "
                 f"Signature={signature}"
             ),
-        }
-
-    def buscar_primeira_oferta(
-        self,
-        query: str,
-        categoria: str = "beleza_premium",
-        emojis: str = "💎✨💄",
-    ) -> dict[str, Any]:
-        logger.info("Buscando '%s' na Shopee (categoria='%s')...", query, categoria)
-        raw_item = self._fetch_from_indexed_shopee(query)
-        if not raw_item:
-            raise ValueError(f"Nenhum produto encontrado na Shopee para a busca: {query!r}")
-
-        oferta = ProdutoOferta(**raw_item)
-        dados_limpos = oferta.model_dump()
-        dados_limpos["categoria"] = categoria
-        dados_limpos["emojis"] = emojis
-        dados_limpos["loja"] = "shopee"
-        return dados_limpos
-
-    def _fetch_from_indexed_shopee(
-        self,
-        query: str,
-        preferred_url: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
-        import unicodedata
-
-        imagem_url: Optional[str] = None
-
-        # 1. Extrai a foto OFICIAL do próprio anúncio da Shopee via OpenGraph (og:image)
-        if preferred_url and preferred_url.startswith("http"):
-            try:
-                og_resp = requests.get(
-                    preferred_url,
-                    headers={"User-Agent": "WhatsApp/2.23.20.0"},
-                    timeout=10,
-                    allow_redirects=True,
-                )
-                if og_resp.status_code == 200:
-                    og_match = re.search(
-                        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-                        og_resp.text,
-                        flags=re.IGNORECASE,
-                    ) or re.search(
-                        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-                        og_resp.text,
-                        flags=re.IGNORECASE,
-                    )
-                    if og_match:
-                        candidate_img = unescape(og_match.group(1)).strip()
-                        if candidate_img.startswith("http"):
-                            imagem_url = candidate_img
-            except Exception as exc:
-                logger.debug("Aviso ao ler og:image do link Shopee %s: %s", preferred_url, exc)
-
-        # 2. Fallback via catálogo apenas se não houver link direto com og:image
-        if not imagem_url:
-            stopwords = {
-                "kit",
-                "com",
-                "de",
-                "da",
-                "do",
-                "para",
-                "escolha",
-                "sua",
-                "cor",
-                "cores",
-                "varias",
-                "original",
-                "lancamento",
-            }
-            normalized = (
-                unicodedata.normalize("NFKD", query).encode("ascii", "ignore").decode("ascii")
-            )
-            words = [
-                w
-                for w in re.sub(r"[^a-zA-Z0-9\s]", " ", normalized).split()
-                if len(w) > 2
-                and w.lower() not in stopwords
-                and not re.match(r"^\d+(?:ml|g|kg|un)$", w.lower())
-            ]
-            candidates = [
-                " ".join(words[:4]),
-                " ".join(words[:3]),
-                " ".join(words[:2]),
-                words[0] if words else "Cosmeticos",
-            ]
-            for cand in candidates:
-                if not cand:
-                    continue
-                try:
-                    encoded = urllib.parse.quote(cand)
-                    url = f"https://www.ikesaki.com.br/api/catalog_system/pub/products/search/{encoded}"
-                    resp = requests.get(
-                        url,
-                        headers={
-                            "User-Agent": self.browser_headers["User-Agent"],
-                            "Accept": "application/json",
-                        },
-                        timeout=10,
-                    )
-                    if resp.status_code in (200, 206) and resp.text.startswith("["):
-                        data = resp.json()
-                        if data:
-                            raw_img = data[0]["items"][0]["images"][0]["imageUrl"]
-                            imagem_url = raw_img.split("?")[0]
-                            break
-                except Exception as exc:
-                    logger.debug("Aviso na busca VTEX para '%s': %s", cand, exc)
-
-        return {
-            "titulo": query,
-            "preco_original": 149.90,
-            "preco_promocional": 99.90,
-            "link_produto": preferred_url
-            or f"https://shopee.com.br/search?keyword={urllib.parse.quote(query)}",
-            "imagem_url": imagem_url or self.DEFAULT_SHOPEE_IMAGE,
         }
