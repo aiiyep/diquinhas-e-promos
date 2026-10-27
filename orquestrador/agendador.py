@@ -254,8 +254,11 @@ async def disparar_oferta(nicho: str) -> bool:
                 for produto in produtos:
                     if not db.foi_postado_recentemente(produto.id):
                         dados_produto = produto.model_dump()
-                        if containers and categoria != "beleza_premium":
-                            dados_produto["link_produto"] = containers[idx % len(containers)]
+                        # Resolve o link direto da página do produto no Mercado Livre (sem sobrescrever com o container)
+                        dados_produto["link_produto"] = ml_ext.resolver_link_direto_produto(
+                            titulo=produto.titulo,
+                            fallback_url=produto.link_produto,
+                        )
 
                         oferta_afiliada = formatter.aplicar_afiliado(dados_produto)
                         sucesso = await publish_product_to_telegram(oferta_afiliada)
