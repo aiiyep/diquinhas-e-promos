@@ -195,16 +195,33 @@ class _ControleEnvio:
     def __init__(self, nicho: str) -> None:
         self.nicho = nicho
         self.falhas = 0
+        self.publicado: Optional[str] = None
         self.formatter = PromoFormatter()
 
     @property
     def esgotado(self) -> bool:
         return self.falhas >= MAX_FALHAS_ENVIO
 
+    def resumo(self) -> str:
+        """Texto curto do resultado, gravado no histórico de disparos do painel."""
+        if self.publicado:
+            return self.publicado
+        if self.esgotado:
+            return f"{self.falhas} envios ao Telegram falharam seguidos"
+        return "Nenhum produto inédito encontrado"
+
     async def tentar(self, produto_id: str, dados_produto: dict[str, Any]) -> bool:
         oferta_afiliada = self.formatter.aplicar_afiliado(dados_produto)
         if await publish_product_to_telegram(oferta_afiliada):
-            db.registrar_postagem(produto_id, self.nicho)
+            db.registrar_postagem(
+                produto_id,
+                self.nicho,
+                titulo=oferta_afiliada.get("titulo"),
+                preco=oferta_afiliada.get("preco_promocional"),
+                link=oferta_afiliada.get("link_produto"),
+                loja=oferta_afiliada.get("loja"),
+            )
+            self.publicado = str(oferta_afiliada.get("titulo") or produto_id)
             return True
         self.falhas += 1
         logger.warning(
@@ -320,11 +337,16 @@ async def disparar_oferta(nicho: str) -> bool:
         if categoria == "beleza_premium":
             if not SHOPEE_CSV_DIR.exists():
                 logger.warning("Pasta de CSVs da Shopee não encontrada em %s.", SHOPEE_CSV_DIR)
+                db.registrar_disparo(nicho, False, "Pasta de CSVs da Shopee não encontrada")
                 return False
-            return await _disparar_shopee(nicho, controle)
-        return await _disparar_mercado_livre(nicho, categoria, idx, controle)
+            sucesso = await _disparar_shopee(nicho, controle)
+        else:
+            sucesso = await _disparar_mercado_livre(nicho, categoria, idx, controle)
+        db.registrar_disparo(nicho, sucesso, controle.resumo())
+        return sucesso
     except Exception as exc:
         logger.error("Erro ao disparar oferta do nicho '%s': %s", nicho, exc)
+        db.registrar_disparo(nicho, False, f"Erro: {exc}")
         return False
 
 

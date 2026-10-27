@@ -4,17 +4,22 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import config  # noqa: F401  (carrega o .env antes dos demais módulos)
+from config import env  # carrega o .env antes dos demais módulos
 from extractors.mercadolivre import MercadoLivreExtractor
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
-from orquestrador.agendador import configurar_agendador, disparar_oferta, scheduler
+from orquestrador.agendador import configurar_agendador, db, disparar_oferta, scheduler
+from painel import iniciar_painel, memoria_logs
 from publishers.telegram_publisher import _resolve_thread_id, fechar_bot, publish_product_to_telegram
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+# O APScheduler loga cada job adicionado/executado; o painel já mostra isso em "Últimos disparos"
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+memoria_logs.setLevel(logging.INFO)
+logging.getLogger().addHandler(memoria_logs)
 logger = logging.getLogger("diquinhas_e_promos")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -87,6 +92,18 @@ async def iniciar_orquestrador_sprints(run_forever: bool = True) -> None:
     if not run_forever:
         scheduler.shutdown(wait=False)
         return
+
+    if env("PAINEL_ATIVO", "1") != "0":
+        try:
+            iniciar_painel(
+                scheduler,
+                db,
+                memoria_logs,
+                host=env("PAINEL_HOST", "127.0.0.1"),
+                porta=int(env("PAINEL_PORTA", "8080")),
+            )
+        except OSError as exc:
+            logger.error("Não foi possível iniciar o painel web: %s", exc)
 
     logger.info("Orquestrador em execução contínua. Pressione Ctrl+C para encerrar.")
     stop_event = asyncio.Event()

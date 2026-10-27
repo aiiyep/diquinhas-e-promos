@@ -31,7 +31,8 @@ orquestrador/agendador.py  # blocos de horário e lógica de disparo
 extractors/                # mercadolivre.py, shopee.py
 formatters/                # links de afiliado
 publishers/                # Telegram
-database/                  # SQLite de deduplicação
+database/                  # SQLite de deduplicação e histórico de disparos
+painel/                    # painel web (status, disparos, postagens, log)
 data/shopee/<marca>/*.csv  # exportações da Shopee Afiliados
 tests/                     # pytest
 ```
@@ -51,6 +52,23 @@ cp .env.example .env               # preencha token, chat_id, thread_ids e crede
 | `python main.py --check-schedule` | Lista os próximos disparos e encerra |
 | `python main.py --test-nicho Moda` | Faz um disparo imediato de um nicho |
 | `python main.py --run-all-now` | Publica um lote (Shopee + containers ML) agora |
+
+## 📊 Painel web
+
+Com o bot rodando (`python main.py`), um painel fica disponível em `http://127.0.0.1:8080`. Ele mostra:
+- há quanto tempo o bot está no ar;
+- o próximo disparo e os seguintes;
+- o resultado de cada disparo;
+- as últimas postagens;
+- o log, com filtro e busca.
+
+O painel só escuta no próprio servidor. Para abrir do seu PC, crie um túnel SSH e acesse `http://localhost:8080`:
+
+```bash
+ssh -N -L 8080:localhost:8080 root@IP_DO_DROPLET
+```
+
+Porta e ativação podem ser configuradas em `PAINEL_PORTA` e `PAINEL_ATIVO` no `.env`.
 
 ## 🧪 Testes
 
