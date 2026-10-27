@@ -84,12 +84,7 @@ NICHO_ROTATION_QUERIES: dict[str, list[str]] = {
         "Coloracao Amend Magnific",
         "Coloracao Haskell Excllusiv",
     ],
-    "k-beauty": [
-        "Serum Facial Dermachem",
-        "Protetor Solar Facial",
-        "Mascara Facial Coreana",
-        "Hidratante Facial",
-    ],
+    # K-Beauty desativado temporariamente a pedido do usuário
 }
 
 NICHO_TO_CATEGORY: dict[str, str] = {
@@ -301,20 +296,19 @@ def configurar_agendador(sched: AsyncIOScheduler | None = None) -> AsyncIOSchedu
     )
 
     # =========================================================================
-    # BLOCO 6 (K-Beauty): das 20:00 às 20:30, a cada 10 minutos
-    # Disparos exatos: 20:00, 20:10, 20:20 e 20:30
+    # BLOCO 6 (K-Beauty): PAUSADO TEMPORARIAMENTE A PEDIDO DO USUÁRIO
     # =========================================================================
-    target_scheduler.add_job(
-        disparar_oferta,
-        trigger="cron",
-        hour=20,
-        minute="0-30/10",
-        args=["K-Beauty"],
-        id="bloco_6_kbeauty_20h",
-        name="BLOCO 6 (K-Beauty) - 20:00 às 20:30 (a cada 10 min)",
-        replace_existing=True,
-        misfire_grace_time=120,
-    )
+    # target_scheduler.add_job(
+    #     disparar_oferta,
+    #     trigger="cron",
+    #     hour=20,
+    #     minute="0-30/10",
+    #     args=["K-Beauty"],
+    #     id="bloco_6_kbeauty_20h",
+    #     name="BLOCO 6 (K-Beauty) - 20:00 às 20:30 (a cada 10 min)",
+    #     replace_existing=True,
+    #     misfire_grace_time=120,
+    # )
 
     # =========================================================================
     # BLOCO 7 (Rosto e Corpo): das 21:30 às 22:00, a cada 6 minutos
