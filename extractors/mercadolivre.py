@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from typing import Any, Optional
+import unicodedata
 import urllib.parse
 
 from dotenv import load_dotenv
@@ -285,35 +286,40 @@ class MercadoLivreExtractor:
         if "/p/MLB" in fallback_url or "/MLB-" in fallback_url or "/up/MLB" in fallback_url:
             return fallback_url
 
-        palavras_chave = " ".join(titulo.split()[:6])
-        query = f"site:mercadolivre.com.br/p/MLB {palavras_chave}"
-        try:
-            resp = self.session.get(
-                "https://www.bing.com/search",
-                params={"q": query, "setlang": "pt-BR", "cc": "BR"},
-                timeout=8,
-            )
-            if resp.status_code == 200:
-                text = unescape(resp.text)
-                b64_matches = re.findall(r"[?&]u=a1([A-Za-z0-9\-_]+)", text)
-                for b64_str in b64_matches:
-                    padded = b64_str + "=" * (-len(b64_str) % 4)
-                    try:
-                        decoded_url = (
-                            base64.urlsafe_b64decode(padded)
-                            .decode("utf-8", errors="ignore")
-                            .split("?")[0]
-                        )
-                        if decoded_url.startswith("http") and (
-                            "/p/MLB" in decoded_url
-                            or "/MLB-" in decoded_url
-                            or "/up/MLB" in decoded_url
-                        ):
-                            return decoded_url
-                    except Exception:
-                        continue
-        except Exception as exc:
-            logger.debug("Aviso ao resolver permalink direto para '%s': %s", titulo, exc)
+        ascii_title = (
+            unicodedata.normalize("NFKD", titulo).encode("ascii", "ignore").decode("ascii")
+        )
+        palavras_chave = " ".join(re.findall(r"[a-zA-Z0-9]+", ascii_title)[:4])
+        for prefix in ("site:mercadolivre.com.br/p/MLB", "site:produto.mercadolivre.com.br"):
+            query = f"{prefix} {palavras_chave}"
+            try:
+                resp = requests.get(
+                    "https://www.bing.com/search",
+                    params={"q": query, "setlang": "pt-BR", "cc": "BR"},
+                    headers={"User-Agent": self.browser_headers["User-Agent"]},
+                    timeout=8,
+                )
+                if resp.status_code == 200:
+                    text = unescape(resp.text)
+                    b64_matches = re.findall(r"[?&]u=a1([A-Za-z0-9\-_]+)", text)
+                    for b64_str in b64_matches:
+                        padded = b64_str + "=" * (-len(b64_str) % 4)
+                        try:
+                            decoded_url = (
+                                base64.urlsafe_b64decode(padded)
+                                .decode("utf-8", errors="ignore")
+                                .split("?")[0]
+                            )
+                            if decoded_url.startswith("http") and (
+                                "/p/MLB" in decoded_url
+                                or "/MLB-" in decoded_url
+                                or "/up/MLB" in decoded_url
+                            ):
+                                return decoded_url
+                        except Exception:
+                            continue
+            except Exception as exc:
+                logger.debug("Aviso ao resolver permalink direto para '%s': %s", titulo, exc)
 
         return fallback_url
 
@@ -521,7 +527,13 @@ class MercadoLivreExtractor:
                             prod_title = str(prod.get("productName") or query.title()).strip()
                             if prod_title.islower():
                                 prod_title = prod_title.title()
-                            slug_title = re.sub(r"[^a-zA-Z0-9]+", "-", prod_title).strip("-")
+                            ascii_prod_title = (
+                                unicodedata.normalize("NFKD", prod_title)
+                                .encode("ascii", "ignore")
+                                .decode("ascii")
+                                .lower()
+                            )
+                            slug_title = re.sub(r"[^a-z0-9]+", "-", ascii_prod_title).strip("-")
                             rating_choices = (4.8, 4.9, 5.0)
                             det_rating = rating_choices[
                                 sum(ord(c) for c in prod_title) % len(rating_choices)
