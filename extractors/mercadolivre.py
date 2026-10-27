@@ -289,9 +289,15 @@ class MercadoLivreExtractor:
         ascii_title = (
             unicodedata.normalize("NFKD", titulo).encode("ascii", "ignore").decode("ascii")
         )
-        palavras_chave = " ".join(re.findall(r"[a-zA-Z0-9]+", ascii_title)[:4])
-        for prefix in ("site:mercadolivre.com.br/p/MLB", "site:produto.mercadolivre.com.br"):
-            query = f"{prefix} {palavras_chave}"
+        tokens = re.findall(r"[a-zA-Z0-9]+", ascii_title)
+        candidate_phrases: list[str] = []
+        for n_words in (4, 3):
+            phrase = " ".join(tokens[:n_words])
+            if phrase and phrase not in candidate_phrases:
+                candidate_phrases.append(phrase)
+
+        for phrase in candidate_phrases:
+            query = f"site:mercadolivre.com.br/p/MLB {phrase}"
             try:
                 resp = requests.get(
                     "https://www.bing.com/search",
