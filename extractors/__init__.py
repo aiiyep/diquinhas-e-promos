@@ -1,15 +1,9 @@
-from extractors.amazon import AmazonExtractor
-from extractors.base import BaseExtractor, Category, Marketplace, ProductOffer
-from extractors.mercadolivre import MercadoLivreExtractor, ProdutoOferta
+from extractors.mercadolivre import MercadoLivreExtractor
 from extractors.shopee import ShopeeExtractor
+from models import ProdutoOferta
 
 __all__ = [
-    "BaseExtractor",
-    "Category",
-    "Marketplace",
-    "ProductOffer",
-    "ProdutoOferta",
-    "AmazonExtractor",
-    "ShopeeExtractor",
     "MercadoLivreExtractor",
+    "ProdutoOferta",
+    "ShopeeExtractor",
 ]

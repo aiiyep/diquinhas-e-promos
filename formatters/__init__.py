@@ -1,3 +1,3 @@
-from formatters.promo_formatter import FormattedPromotion, PromoFormatter
+from formatters.promo_formatter import PromoFormatter
 
-__all__ = ["FormattedPromotion", "PromoFormatter"]
+__all__ = ["PromoFormatter"]

@@ -3,15 +3,13 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Any
-from dotenv import load_dotenv
 
-load_dotenv()
-
+import config  # noqa: F401  (carrega o .env antes dos demais módulos)
 from extractors.mercadolivre import MercadoLivreExtractor
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
 from orquestrador.agendador import configurar_agendador, disparar_oferta, scheduler
-from publishers.telegram_publisher import _resolve_thread_id, publish_product_to_telegram
+from publishers.telegram_publisher import _resolve_thread_id, fechar_bot, publish_product_to_telegram
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +35,8 @@ async def run_telegram_pipeline(
 
     if post_shopee_csvs and SHOPEE_CSV_DIR.exists():
         shopee_extractor = ShopeeExtractor()
-        ofertas_shopee: list[dict[str, Any]] = shopee_extractor.extrair_de_pastas_csv(
+        ofertas_shopee: list[dict[str, Any]] = await asyncio.to_thread(
+            shopee_extractor.extrair_de_pastas_csv,
             base_dir=SHOPEE_CSV_DIR,
             por_marca=shopee_por_marca,
             categoria="beleza_premium",
@@ -50,7 +49,9 @@ async def run_telegram_pipeline(
 
     if post_ml_containers:
         ml_extractor = MercadoLivreExtractor()
-        ofertas_ml: list[dict[str, Any]] = ml_extractor.extrair_todos_containers_mapeados()
+        ofertas_ml: list[dict[str, Any]] = await asyncio.to_thread(
+            ml_extractor.extrair_todos_containers_mapeados
+        )
         for oferta in ofertas_ml:
             categoria = oferta.get("categoria", "")
             if _resolve_thread_id(categoria) is None:
@@ -112,15 +113,15 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.test_nicho:
-        await disparar_oferta(args.test_nicho)
-        return
-
-    if args.run_all_now:
-        await run_telegram_pipeline()
-        return
-
-    await iniciar_orquestrador_sprints(run_forever=not args.check_schedule)
+    try:
+        if args.test_nicho:
+            await disparar_oferta(args.test_nicho)
+        elif args.run_all_now:
+            await run_telegram_pipeline()
+        else:
+            await iniciar_orquestrador_sprints(run_forever=not args.check_schedule)
+    finally:
+        await fechar_bot()
 
 
 if __name__ == "__main__":
