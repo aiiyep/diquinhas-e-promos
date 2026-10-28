@@ -30,7 +30,14 @@ from typing import Any, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database.historico_ofertas import HistoricoDB
-from extractors.mercadolivre import TOPIC_EMOJIS, MercadoLivreExtractor
+from extractors.mercadolivre import (
+    OFERTAS_SUBCATEGORIAS,
+    PERFUMES_CATEGORIA,
+    PERFUMES_DOMINIOS,
+    PERFUMES_FEMININOS_TERMOS,
+    TOPIC_EMOJIS,
+    MercadoLivreExtractor,
+)
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
 from publishers.telegram_publisher import publish_product_to_telegram
@@ -152,10 +159,14 @@ NICHO_TO_CATEGORY: dict[str, str] = {
     "kbeauty": "k-beauty",
     "beleza premium": "beleza_premium",
     "beleza_premium": "beleza_premium",
+    "ofertas": "ofertas",
 }
 
 # Tabela dos Sprints: cada linha vira um job CRON (ver regras anti-vazamento no topo do arquivo)
 BLOCOS: list[dict[str, Any]] = [
+    # BLOCO 0 (Ofertas): mais vendidos de Beleza com desconto real — 10:00, 10:10, 10:20, 10:30
+    {"id": "bloco_0_ofertas_10h", "nicho": "Ofertas", "hour": 10, "minute": "0-30/10",
+     "name": "BLOCO 0 (Ofertas) - 10:00 às 10:30 (a cada 10 min)"},
     # BLOCO 1 (Rosto e Corpo): 08:30, 08:40, 08:50 + fechamento 09:00
     {"id": "bloco_1_rosto_e_corpo_08h", "nicho": "Rosto e Corpo", "hour": 8, "minute": "30-50/10",
      "name": "BLOCO 1 (Rosto e Corpo) - 08:30 às 08:50"},
@@ -258,6 +269,37 @@ async def _disparar_shopee(nicho: str, controle: _ControleEnvio) -> bool:
     return False
 
 
+async def _disparar_ofertas(nicho: str, idx: int, controle: _ControleEnvio) -> bool:
+    """
+    Publica o mais vendido de Beleza com maior desconto real ainda não postado, rodando
+    entre as subcategorias femininas (`OFERTAS_SUBCATEGORIAS`) a cada disparo.
+    Em Perfumes, busca 3 perfumes femininos conhecidos por vez (`PERFUMES_FEMININOS_TERMOS`).
+    """
+    ml_ext = MercadoLivreExtractor()
+    subcategorias = list(OFERTAS_SUBCATEGORIAS)
+    opcoes = {"categoria": "ofertas", "emojis": TOPIC_EMOJIS["ofertas"], "ignorar": db.foi_postado_recentemente}
+
+    for offset in range(len(subcategorias)):
+        categoria_id = subcategorias[(idx + offset) % len(subcategorias)]
+        logger.info("Buscando ofertas em %s (%s)...", OFERTAS_SUBCATEGORIAS[categoria_id], categoria_id)
+        if categoria_id == PERFUMES_CATEGORIA:
+            inicio = idx * 3
+            termos = [PERFUMES_FEMININOS_TERMOS[(inicio + i) % len(PERFUMES_FEMININOS_TERMOS)] for i in range(3)]
+            ofertas = await asyncio.to_thread(
+                ml_ext.buscar_ofertas_por_termos, termos, dominios=PERFUMES_DOMINIOS, **opcoes
+            )
+        else:
+            ofertas = await asyncio.to_thread(ml_ext.buscar_ofertas_mais_vendidos, categoria_id, **opcoes)
+        for oferta in ofertas:
+            if controle.esgotado:
+                return False
+            if await controle.tentar(oferta.id, oferta.model_dump()):
+                return True
+
+    logger.warning("Nenhuma oferta inédita com desconto real encontrada para '%s'.", nicho)
+    return False
+
+
 async def _disparar_mercado_livre(nicho: str, categoria: str, idx: int, controle: _ControleEnvio) -> bool:
     ml_ext = MercadoLivreExtractor()
     queries = NICHO_ROTATION_QUERIES.get(categoria, [nicho])
@@ -340,6 +382,8 @@ async def disparar_oferta(nicho: str) -> bool:
                 db.registrar_disparo(nicho, False, "Pasta de CSVs da Shopee não encontrada")
                 return False
             sucesso = await _disparar_shopee(nicho, controle)
+        elif categoria == "ofertas":
+            sucesso = await _disparar_ofertas(nicho, idx, controle)
         else:
             sucesso = await _disparar_mercado_livre(nicho, categoria, idx, controle)
         db.registrar_disparo(nicho, sucesso, controle.resumo())

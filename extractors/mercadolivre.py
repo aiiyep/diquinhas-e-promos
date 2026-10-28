@@ -3,12 +3,13 @@ from html import unescape
 import logging
 import re
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import unicodedata
 
 import requests
 
 from config import BROWSER_HEADERS, BROWSER_USER_AGENT, env
+from extractors.filtros import eh_produto_masculino, genero_permitido
 from models import ProdutoOferta
 
 logger = logging.getLogger("diquinhas_e_promos.mercadolivre")
@@ -47,15 +48,94 @@ TOPIC_EMOJIS: dict[str, str] = {
     "unhas": "💅✨💖",
     "moda": "👗👠✨",
     "k-beauty": "🌸✨🇰🇷",
+    "ofertas": "🔥💸✨",
 }
+
+# Subcategorias de Beleza e Cuidado Pessoal (MLB1246) usadas no tópico Ofertas.
+# Ficam de fora: Barbearia, Higiene Pessoal, Farmácia, Outros e Artigos para Cabeleireiros.
+OFERTAS_SUBCATEGORIAS: dict[str, str] = {
+    "MLB199407": "Cuidados com a Pele",
+    "MLB1263": "Cuidados com o Cabelo",
+    "MLB1248": "Maquiagem",
+    "MLB29884": "Manicure e Pedicure",
+    "MLB6284": "Perfumes",
+    "MLB278194": "Tratamentos de Beleza",
+    "MLB5383": "Depilação",
+    "MLB455174": "Artefatos para Cabelo",
+}
+
+# Em Perfumes os mais vendidos visíveis pela API são quase todos masculinos (os demais são
+# USER_PRODUCT, que a API não deixa ler). Por isso essa subcategoria busca perfumes femininos conhecidos.
+PERFUMES_CATEGORIA = "MLB6284"
+PERFUMES_DOMINIOS = {"MLB-PERFUMES"}
+PERFUMES_FEMININOS_TERMOS: list[str] = [
+    "Floratta Boticario",
+    "Egeo Dolce",
+    "Lily Boticario",
+    "Natura Una",
+    "Natura Ekos Frescor",
+    "Kaiak Feminino",
+    "Essencial Feminino Natura",
+    "Glamour Boticario",
+    "Cuide-se Bem Boticario",
+    "Body Splash Feminino",
+    "Deo Colonia Feminina",
+    "La Vie Est Belle Lancome",
+    "Good Girl Carolina Herrera",
+    "212 VIP Rose",
+    "Olympea Paco Rabanne",
+    "Perfume Arabe Feminino",
+]
+
+API_URL = "https://api.mercadolibre.com"
+
+# Caches em memória (compartilhados entre instâncias): {chave: (expira_em, dados)}
+CACHE_DESTAQUES_TTL = 6 * 3600
+CACHE_PRODUTO_TTL = 24 * 3600
+_CACHE_DESTAQUES: dict[str, tuple[float, Any]] = {}
+_CACHE_PRODUTOS: dict[str, tuple[float, Any]] = {}
 
 __all__ = [
     "CONTAINER_SEARCH_HINTS",
     "ML_TOPIC_CONTAINERS",
     "MercadoLivreExtractor",
+    "OFERTAS_SUBCATEGORIAS",
+    "PERFUMES_CATEGORIA",
+    "PERFUMES_DOMINIOS",
+    "PERFUMES_FEMININOS_TERMOS",
     "ProdutoOferta",
     "TOPIC_EMOJIS",
 ]
+
+
+def _api_get(
+    url: str,
+    headers: dict[str, str],
+    params: Optional[dict[str, Any]] = None,
+    timeout: int = 15,
+    tentativas: int = 3,
+) -> Optional[requests.Response]:
+    """
+    GET na API oficial que respeita o limite de requisições: ao receber HTTP 429, espera
+    (o `Retry-After` informado ou 2s, 4s, 8s…, no máximo 30s) e tenta de novo.
+    """
+    resp: Optional[requests.Response] = None
+    for tentativa in range(tentativas):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        except Exception as exc:
+            logger.debug("Erro de rede em %s: %s", url, exc)
+            return None
+        if resp.status_code != 429:
+            return resp
+        try:
+            espera = float(resp.headers.get("Retry-After") or 0) or 2.0 ** (tentativa + 1)
+        except ValueError:
+            espera = 2.0 ** (tentativa + 1)
+        espera = min(espera, 30.0)
+        logger.warning("Limite de requisições da API do ML (HTTP 429); aguardando %.0fs...", espera)
+        time.sleep(espera)
+    return resp
 
 
 def _slugify(text: str) -> str:
@@ -140,8 +220,9 @@ class MercadoLivreExtractor:
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         items_out: list[dict[str, Any]] = []
         try:
-            resp = requests.get(
-                "https://api.mercadolibre.com/products/search",
+            resp = _api_get(
+                f"{API_URL}/products/search",
+                headers,
                 params={
                     "status": "active",
                     "site_id": "MLB",
@@ -149,11 +230,11 @@ class MercadoLivreExtractor:
                     "limit": limit,
                     "offset": max(0, page) * limit,
                 },
-                headers=headers,
-                timeout=15,
             )
-            if resp.status_code != 200:
-                logger.warning("Catálogo oficial ML retornou HTTP %s para '%s'.", resp.status_code, query)
+            if resp is None or resp.status_code != 200:
+                logger.warning(
+                    "Catálogo oficial ML retornou HTTP %s para '%s'.", getattr(resp, "status_code", "erro"), query
+                )
                 return []
 
             for prod in resp.json().get("results") or []:
@@ -164,24 +245,10 @@ class MercadoLivreExtractor:
                 if not prod_id or not nome or not imagem:
                     continue
 
-                try:
-                    items_resp = requests.get(
-                        f"https://api.mercadolibre.com/products/{prod_id}/items",
-                        headers=headers,
-                        timeout=10,
-                    )
-                    if items_resp.status_code != 200:
-                        continue
-                    anuncios = [
-                        a for a in (items_resp.json().get("results") or [])
-                        if float(a.get("price") or 0) > 0
-                    ]
-                except Exception:
-                    continue
-                if not anuncios:
+                melhor = self._melhor_anuncio(prod_id, headers)
+                if not melhor:
                     continue  # produto sem anúncio ativo (indisponível)
 
-                melhor = min(anuncios, key=lambda a: float(a["price"]))
                 items_out.append(
                     {
                         "id": prod_id,
@@ -195,6 +262,183 @@ class MercadoLivreExtractor:
         except Exception as exc:
             logger.warning("Erro no catálogo oficial ML para '%s': %s", query, exc)
         return items_out
+
+    @staticmethod
+    def _melhor_anuncio(prod_id: str, headers: dict[str, str]) -> Optional[dict[str, Any]]:
+        """Anúncio ativo de menor preço de um produto de catálogo (`/products/{id}/items`)."""
+        resp = _api_get(f"{API_URL}/products/{prod_id}/items", headers, timeout=10)
+        if resp is None or resp.status_code != 200:
+            return None
+        try:
+            anuncios = [a for a in (resp.json().get("results") or []) if float(a.get("price") or 0) > 0]
+        except Exception:
+            return None
+        return min(anuncios, key=lambda a: float(a["price"])) if anuncios else None
+
+    def _headers_oficiais(self) -> Optional[dict[str, str]]:
+        token = self._obter_token_oficial()
+        if not token:
+            logger.error("Ofertas exigem ML_CLIENT_ID/ML_CLIENT_SECRET configurados no .env.")
+            return None
+        return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    @staticmethod
+    def _cache_get(cache: dict[str, tuple[float, Any]], chave: str) -> Any:
+        entrada = cache.get(chave)
+        return entrada[1] if entrada and entrada[0] > time.time() else None
+
+    def _produto_catalogo(self, prod_id: str, headers: dict[str, str]) -> Optional[dict[str, Any]]:
+        """Dados do produto de catálogo (nome, fotos, atributos), guardados em cache por 24h."""
+        prod = self._cache_get(_CACHE_PRODUTOS, prod_id)
+        if prod is None:
+            resp = _api_get(f"{API_URL}/products/{prod_id}", headers, timeout=10)
+            if resp is None or resp.status_code != 200:
+                return None
+            prod = resp.json()
+            _CACHE_PRODUTOS[prod_id] = (time.time() + CACHE_PRODUTO_TTL, prod)
+        return prod
+
+    def _montar_oferta(
+        self,
+        prod: dict[str, Any],
+        headers: dict[str, str],
+        categoria: str,
+        emojis: str,
+    ) -> Optional[ProdutoOferta]:
+        """Transforma um produto de catálogo em oferta, se for feminino/neutro e tiver desconto real."""
+        prod_id = str(prod.get("id") or "")
+        nome = str(prod.get("name") or "").strip()
+        pictures = prod.get("pictures") or []
+        if not prod_id or not nome or not pictures:
+            return None
+
+        generos = [
+            str(a.get("value_name") or "")
+            for a in prod.get("attributes") or []
+            if a.get("id") == "GENDER"
+        ]
+        if eh_produto_masculino(nome, str(prod.get("domain_id") or ""), *generos) or not genero_permitido(generos):
+            logger.info("Produto masculino/fora do público descartado das ofertas: %s (gênero=%s)", nome[:60], generos)
+            return None
+
+        melhor = self._melhor_anuncio(prod_id, headers)
+        if not melhor or not melhor.get("original_price"):
+            return None
+        oferta = ProdutoOferta(
+            id=prod_id,
+            titulo=nome,
+            preco_original=melhor["original_price"],
+            preco_promocional=float(melhor["price"]),
+            link_produto=f"https://www.mercadolivre.com.br/{_slugify(nome)}/p/{prod_id}",
+            imagem_url=str(pictures[0].get("url") or ""),
+            categoria=categoria,
+            emojis=emojis,
+            loja="mercado_livre",
+        )
+        # o modelo zera "De" que não for maior que o preço atual
+        return oferta if oferta.preco_original else None
+
+    @staticmethod
+    def _ordenar_por_desconto(ofertas: list[ProdutoOferta]) -> list[ProdutoOferta]:
+        return sorted(ofertas, key=lambda o: o.preco_promocional / (o.preco_original or o.preco_promocional))
+
+    def buscar_ofertas_mais_vendidos(
+        self,
+        categoria_id: str,
+        categoria: str = "ofertas",
+        emojis: str = "🔥💸✨",
+        ignorar: Optional[Callable[[str], bool]] = None,
+    ) -> list[ProdutoOferta]:
+        """
+        Mais vendidos de uma categoria do ML (`/highlights/MLB/category/{id}`) que estão com
+        desconto real (preço "De" informado pelo próprio anúncio), sem produtos masculinos,
+        ordenados do maior para o menor percentual de desconto.
+        `ignorar(id)` permite pular produtos já postados antes de gastar chamadas na API.
+        A lista de mais vendidos fica em cache por 6h; os preços são sempre consultados na hora.
+        """
+        headers = self._headers_oficiais()
+        if headers is None:
+            return []
+
+        destaques = self._cache_get(_CACHE_DESTAQUES, categoria_id)
+        if destaques is None:
+            resp = _api_get(f"{API_URL}/highlights/MLB/category/{categoria_id}", headers)
+            if resp is None or resp.status_code != 200:
+                logger.warning(
+                    "Mais vendidos de %s retornou HTTP %s.", categoria_id, getattr(resp, "status_code", "erro")
+                )
+                return []
+            destaques = resp.json().get("content") or []
+            _CACHE_DESTAQUES[categoria_id] = (time.time() + CACHE_DESTAQUES_TTL, destaques)
+
+        ofertas: list[ProdutoOferta] = []
+        for destaque in destaques:
+            prod_id = str(destaque.get("id") or "")
+            # USER_PRODUCT (MLBU...) só pode ser lido pelo vendedor dono; a API responde 403
+            if destaque.get("type") != "PRODUCT" or not prod_id:
+                continue
+            if ignorar and ignorar(prod_id):
+                continue
+            prod = self._produto_catalogo(prod_id, headers)
+            if prod:
+                oferta = self._montar_oferta({**prod, "id": prod_id}, headers, categoria, emojis)
+                if oferta:
+                    ofertas.append(oferta)
+
+        logger.info("Mais vendidos de %s com desconto real: %d.", categoria_id, len(ofertas))
+        return self._ordenar_por_desconto(ofertas)
+
+    def buscar_ofertas_por_termos(
+        self,
+        termos: list[str],
+        categoria: str = "ofertas",
+        emojis: str = "🔥💸✨",
+        ignorar: Optional[Callable[[str], bool]] = None,
+        limite_por_termo: int = 10,
+        dominios: Optional[set[str]] = None,
+    ) -> list[ProdutoOferta]:
+        """
+        Busca no catálogo (`/products/search`) produtos específicos, como os perfumes femininos
+        de `PERFUMES_FEMININOS_TERMOS`, e devolve os que têm desconto real e gênero permitido,
+        do maior para o menor desconto. O resultado de cada busca fica em cache por 6h.
+        `dominios` restringe ao tipo de produto do catálogo (ex.: só `MLB-PERFUMES`).
+        """
+        headers = self._headers_oficiais()
+        if headers is None:
+            return []
+
+        ofertas: list[ProdutoOferta] = []
+        vistos: set[str] = set()
+        for termo in termos:
+            chave = f"q:{termo.lower()}"
+            resultados = self._cache_get(_CACHE_DESTAQUES, chave)
+            if resultados is None:
+                resp = _api_get(
+                    f"{API_URL}/products/search",
+                    headers,
+                    params={"status": "active", "site_id": "MLB", "q": termo, "limit": limite_por_termo},
+                )
+                if resp is None or resp.status_code != 200:
+                    logger.warning(
+                        "Busca de catálogo por '%s' retornou HTTP %s.", termo, getattr(resp, "status_code", "erro")
+                    )
+                    continue
+                resultados = resp.json().get("results") or []
+                _CACHE_DESTAQUES[chave] = (time.time() + CACHE_DESTAQUES_TTL, resultados)
+
+            for prod in resultados:
+                prod_id = str(prod.get("id") or "")
+                if not prod_id or prod_id in vistos or (ignorar and ignorar(prod_id)):
+                    continue
+                if dominios and prod.get("domain_id") not in dominios:
+                    continue
+                vistos.add(prod_id)
+                oferta = self._montar_oferta(prod, headers, categoria, emojis)
+                if oferta:
+                    ofertas.append(oferta)
+
+        logger.info("Busca por %d termos com desconto real: %d.", len(termos), len(ofertas))
+        return self._ordenar_por_desconto(ofertas)
 
     def buscar_ofertas(
         self,

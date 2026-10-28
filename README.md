@@ -11,6 +11,7 @@ APScheduler (cron, America/Sao_Paulo)
   └─ disparar_oferta(nicho)                 orquestrador/agendador.py
        ├─ Mercado Livre: catálogo oficial → API de busca pública      extractors/mercadolivre.py
        │   (rotaciona palavras-chave por nicho e pagina 0, 1, 2)
+       ├─ Ofertas: mais vendidos de Beleza (API /highlights) com desconto real
        ├─ Shopee: CSVs do painel de afiliados em data/shopee/<marca>/  extractors/shopee.py
        ├─ HistoricoDB: pula produtos postados nos últimos 14 dias       database/historico_ofertas.py
        ├─ PromoFormatter: injeta parâmetros de afiliado no link        formatters/promo_formatter.py
@@ -18,6 +19,11 @@ APScheduler (cron, America/Sao_Paulo)
 ```
 
 - Preço "De" e nota ⭐ só aparecem quando vêm de dados reais da loja.
+- **Tópico Ofertas:**
+  - A cada disparo, o bot passa para a próxima subcategoria feminina de Beleza (`OFERTAS_SUBCATEGORIAS`).
+  - Dentro dela, publica o mais vendido de maior desconto real que ainda não foi postado.
+  - Produtos masculinos são descartados pelo filtro em `extractors/filtros.py`.
+  - A página `/ofertas` do ML não é usada porque bloqueia acesso automatizado com um desafio anti-bot.
 - Se um envio falha, o bot tenta o próximo produto (até 3 falhas seguidas).
 - Os horários dos blocos ficam na tabela `BLOCOS` em `orquestrador/agendador.py`.
 
