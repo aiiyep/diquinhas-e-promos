@@ -8,13 +8,17 @@ _TERMOS_MASCULINOS = re.compile(
     r"\b("
     r"homem|homens|masculino|masculinos|masculina|masculinas|menino|meninos|"
     r"men|man|male|"
-    r"barbeador|barbeadores|barbear|barbeado|barba|barbas|barbearia|barbeiro|"
-    r"pos ?barba|after ?shaves?|shavers?|beards?"
+    r"barbear|barbeado|barba|barbas|barbearia|barbeiro|"
+    r"pos ?barba|after ?shaves?|beards?"
     r")\b"
 )
 
-# Termos de aparelhos de corte que só passam quando o produto se declara feminino
-_TERMOS_CORTE = re.compile(r"\b(aparador|aparadores|maquininha|maquina de cortar|cortar cabelo|cortador de cabelo)\b")
+# Aparelhos de corte e barbeadores que só passam quando o produto se declara feminino
+# (ex.: "Barbeador Elétrico Feminino" vendido para depilação)
+_TERMOS_CORTE = re.compile(
+    r"\b(aparador|aparadores|maquininha|maquina de cortar|cortar cabelo|cortador de cabelo|"
+    r"barbeador|barbeadores|shavers?)\b"
+)
 _FEMININO = re.compile(r"\b(feminino|feminina|femininos|femininas|mulher|mulheres|women|female)\b")
 
 # Valores do atributo GENDER do catálogo do ML aceitos no grupo
@@ -31,8 +35,8 @@ def _normalizar(texto: str) -> str:
 def eh_produto_masculino(*textos: str) -> bool:
     """
     True se qualquer um dos textos (título, gênero, domínio do catálogo…) indicar produto
-    masculino: qualquer variante de homem/masculino/menino/barbeador/barba, ou aparelho de
-    corte que não se declare feminino.
+    masculino: qualquer variante de homem/masculino/menino/barba, ou aparelho de corte ou
+    barbeador que não se declare feminino.
     """
     texto = _normalizar(" ".join(t for t in textos if t))
     if _TERMOS_MASCULINOS.search(texto):

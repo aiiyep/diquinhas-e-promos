@@ -44,3 +44,35 @@ def test_extrair_de_csv_calcula_de_a_partir_do_desconto_real(tmp_path):
     )
     [oferta] = ShopeeExtractor().extrair_de_csv(csv_file, resolver_imagens=False)
     assert oferta["preco_original"] == 100.0
+
+
+def test_atualizar_com_api_usa_preco_atual_e_so_calcula_de_com_preco_unico(monkeypatch):
+    ext = ShopeeExtractor(app_id="123", app_secret="segredo")
+    respostas = {
+        "1": {"itemId": 1, "price": "30", "priceMin": "30", "priceMax": "30", "priceDiscountRate": 40,
+              "ratingStar": "4.87", "imageUrl": "https://cf.shopee.com.br/file/a"},
+        "2": {"itemId": 2, "price": "10", "priceMin": "10", "priceMax": "50", "priceDiscountRate": 60,
+              "ratingStar": "0", "imageUrl": ""},
+    }
+    monkeypatch.setattr(ext, "_consultar_lote_api", lambda ids: {str(i): respostas[str(i)] for i in ids if str(i) in respostas})
+    base = {"preco_original": None, "imagem_url": None, "avaliacao": None, "categoria": "ofertas",
+            "emojis": "🔥", "loja": "shopee", "marca": "ofertas"}
+    ofertas = [
+        {**base, "id": "SHOPEE1", "titulo": "Creme", "preco_promocional": 99.0, "link_produto": "https://s.shopee.com.br/a"},
+        {**base, "id": "SHOPEE2", "titulo": "Kit", "preco_promocional": 99.0, "link_produto": "https://s.shopee.com.br/b"},
+        {**base, "id": "SHOPEE3", "titulo": "Sumiu", "preco_promocional": 99.0, "link_produto": "https://s.shopee.com.br/c"},
+    ]
+    creme, kit = ext.atualizar_com_api(ofertas)
+
+    assert (creme["preco_promocional"], creme["preco_original"], creme["avaliacao"]) == (30.0, 50.0, 4.9)
+    assert creme["imagem_url"] == "https://cf.shopee.com.br/file/a"
+    assert creme["link_produto"] == "https://s.shopee.com.br/a" and creme["marca"] == "ofertas"
+    # com variações de preço não dá para saber a qual preço o desconto se refere: sem "De"
+    assert (kit["preco_promocional"], kit["preco_original"], kit["avaliacao"], kit["imagem_url"]) == (10.0, None, None, None)
+
+
+def test_atualizar_com_api_sem_credenciais_nao_altera(monkeypatch):
+    ext = ShopeeExtractor()
+    ext.app_id = ext.app_secret = ""  # "" no construtor cairia nas chaves do .env
+    ofertas = [{"id": "SHOPEE1", "titulo": "Creme"}]
+    assert ext.atualizar_com_api(ofertas) == ofertas

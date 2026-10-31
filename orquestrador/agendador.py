@@ -51,12 +51,22 @@ SHOPEE_CSV_DIR = BASE_DIR / "data" / "shopee"
 # CSVs da Shopee Afiliados do K-Beauty: uma subpasta por loja (glory-of-seoul, jadoo, ...)
 KBEAUTY_CSV_DIR = BASE_DIR / "data" / "kbeauty"
 
-# Como cada fonte de CSV da Shopee é lida: pasta, emojis e quantos produtos por loja/marca
+# CSVs da Shopee Afiliados do tópico Ofertas (soltos na pasta ou em subpastas)
+OFERTAS_CSV_DIR = BASE_DIR / "data" / "ofertas"
+
+# Como cada fonte de CSV da Shopee é lida: pasta, emojis, quantos produtos por loja/marca,
+# se alterna as lojas a cada disparo e se só aceita produto com desconto real informado no CSV
 FONTES_SHOPEE: dict[str, dict[str, Any]] = {
-    "beleza_premium": {"pasta": SHOPEE_CSV_DIR, "emojis": "💎✨💄", "por_marca": 10, "intercalar": False},
+    "beleza_premium": {"pasta": SHOPEE_CSV_DIR, "emojis": "💎✨💄", "por_marca": 10,
+                       "intercalar": False, "so_com_desconto": False},
     # K-Beauty usa o catálogo inteiro de cada loja e alterna a loja a cada disparo
-    "k-beauty": {"pasta": KBEAUTY_CSV_DIR, "emojis": TOPIC_EMOJIS["k-beauty"], "por_marca": 1000, "intercalar": True},
+    "k-beauty": {"pasta": KBEAUTY_CSV_DIR, "emojis": TOPIC_EMOJIS["k-beauty"], "por_marca": 1000,
+                 "intercalar": True, "so_com_desconto": False},
 }
+# Metade Shopee do tópico Ofertas: mesmo critério do ML (desconto real, maior desconto primeiro).
+# O CSV só lista os produtos; preço, desconto, nota e foto vêm na hora da Open API de Afiliados.
+OFERTAS_SHOPEE: dict[str, Any] = {"pasta": OFERTAS_CSV_DIR, "emojis": TOPIC_EMOJIS["ofertas"], "por_marca": 1000,
+                                  "intercalar": False, "so_com_desconto": True, "usar_api": True}
 
 # Quantos envios ao Telegram podem falhar seguidos antes de desistir do disparo
 MAX_FALHAS_ENVIO = 3
@@ -275,8 +285,19 @@ def _intercalar_por_marca(candidatos: list[dict[str, Any]], inicio: int) -> list
     return intercalados
 
 
-async def _disparar_shopee(nicho: str, categoria: str, idx: int, controle: _ControleEnvio) -> bool:
-    fonte = FONTES_SHOPEE[categoria]
+def _desconto(dados: dict[str, Any]) -> float:
+    """Fração de desconto real (0.25 = 25%); 0 quando o CSV não informa o preço "De"."""
+    original = dados.get("preco_original")
+    return 1 - dados["preco_promocional"] / original if original else 0.0
+
+
+async def _disparar_shopee(
+    nicho: str, categoria: str, idx: int, controle: _ControleEnvio, fonte: Optional[dict[str, Any]] = None
+) -> bool:
+    fonte = fonte or FONTES_SHOPEE[categoria]
+    if not fonte["pasta"].exists():
+        logger.warning("Pasta de CSVs da Shopee não encontrada em %s.", fonte["pasta"])
+        return False
     shopee_ext = ShopeeExtractor()
     candidatos = await asyncio.to_thread(
         shopee_ext.extrair_de_pastas_csv,
@@ -286,6 +307,10 @@ async def _disparar_shopee(nicho: str, categoria: str, idx: int, controle: _Cont
         emojis=fonte["emojis"],
         resolver_imagens=False,
     )
+    if fonte.get("usar_api"):
+        candidatos = await asyncio.to_thread(shopee_ext.atualizar_com_api, candidatos)
+    if fonte["so_com_desconto"]:
+        candidatos = sorted((c for c in candidatos if _desconto(c) > 0), key=_desconto, reverse=True)
     if fonte["intercalar"]:
         candidatos = _intercalar_por_marca(candidatos, idx)
     for dados in candidatos:
@@ -307,6 +332,27 @@ async def _disparar_shopee(nicho: str, categoria: str, idx: int, controle: _Cont
 
 
 async def _disparar_ofertas(nicho: str, idx: int, controle: _ControleEnvio) -> bool:
+    """
+    Alterna Mercado Livre e Shopee a cada disparo (par = ML, ímpar = Shopee). Se a loja da vez
+    não tiver nada inédito com desconto real, tenta a outra.
+    """
+    ordem = [_disparar_ofertas_ml, _disparar_ofertas_shopee]
+    if idx % 2:
+        ordem.reverse()
+    for fonte in ordem:
+        if controle.esgotado:
+            return False
+        if await fonte(nicho, idx // 2, controle):
+            return True
+    return False
+
+
+async def _disparar_ofertas_shopee(nicho: str, idx: int, controle: _ControleEnvio) -> bool:
+    """Produto dos CSVs de `data/ofertas/` com o maior desconto real informado, sem masculinos."""
+    return await _disparar_shopee(nicho, "ofertas", idx, controle, fonte=OFERTAS_SHOPEE)
+
+
+async def _disparar_ofertas_ml(nicho: str, idx: int, controle: _ControleEnvio) -> bool:
     """
     Publica o mais vendido de Beleza com maior desconto real ainda não postado, rodando
     entre as subcategorias femininas (`OFERTAS_SUBCATEGORIAS`) a cada disparo.
@@ -411,11 +457,6 @@ async def disparar_oferta(nicho: str) -> bool:
     controle = _ControleEnvio(nicho)
     try:
         if categoria in FONTES_SHOPEE:
-            pasta = FONTES_SHOPEE[categoria]["pasta"]
-            if not pasta.exists():
-                logger.warning("Pasta de CSVs da Shopee não encontrada em %s.", pasta)
-                db.registrar_disparo(nicho, False, "Pasta de CSVs da Shopee não encontrada")
-                return False
             sucesso = await _disparar_shopee(nicho, categoria, idx, controle)
         elif categoria == "ofertas":
             sucesso = await _disparar_ofertas(nicho, idx, controle)
