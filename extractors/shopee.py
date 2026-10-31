@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import json
 from html import unescape
 import logging
 from pathlib import Path
@@ -28,6 +29,9 @@ class ShopeeExtractor:
     """
 
     GRAPHQL_URL = "https://open-api.affiliate.shopee.com.br/graphql"
+    # Código de erro "Rate limit exceeded" da Open API e esperas (s) antes de cada nova tentativa
+    ERRO_RATE_LIMIT = 10030
+    ESPERAS_RATE_LIMIT = (5, 15, 30)
 
     def __init__(
         self,
@@ -336,3 +340,77 @@ class ShopeeExtractor:
                 f"Signature={signature}"
             ),
         }
+
+    def _consultar_lote_api(self, item_ids: list[int]) -> dict[str, dict[str, Any]]:
+        """Uma requisição à Open API de Afiliados com vários `productOfferV2` (aliases do GraphQL)."""
+        campos = "itemId price priceMin priceMax priceDiscountRate ratingStar imageUrl"
+        consulta = " ".join(
+            f"i{n}: productOfferV2(itemId: {item_id}){{nodes{{{campos}}}}}" for n, item_id in enumerate(item_ids)
+        )
+        payload = json.dumps({"query": "{" + consulta + "}"}, separators=(",", ":"))
+        for espera in (*self.ESPERAS_RATE_LIMIT, None):
+            try:
+                resp = requests.post(
+                    self.GRAPHQL_URL, data=payload, headers=self._build_graphql_headers(payload), timeout=20
+                )
+                corpo = resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                logger.warning("Falha ao consultar a API de Afiliados da Shopee: %s", exc)
+                return {}
+            limitado = any(
+                (erro.get("extensions") or {}).get("code") == self.ERRO_RATE_LIMIT for erro in corpo.get("errors") or []
+            )
+            if not limitado or espera is None:
+                break
+            logger.info("API de Afiliados da Shopee no limite de requisições; nova tentativa em %ds.", espera)
+            time.sleep(espera)
+        if resp.status_code != 200 or corpo.get("errors"):
+            logger.warning(
+                "API de Afiliados da Shopee respondeu HTTP %s: %s", resp.status_code, str(corpo.get("errors"))[:300]
+            )
+        nodes: dict[str, dict[str, Any]] = {}
+        for resultado in (corpo.get("data") or {}).values():
+            for node in (resultado or {}).get("nodes") or []:
+                nodes[str(node.get("itemId"))] = node
+        return nodes
+
+    def atualizar_com_api(self, ofertas: list[dict[str, Any]], lote: int = 20) -> list[dict[str, Any]]:
+        """
+        Atualiza ofertas lidas do CSV com os dados atuais da Open API de Afiliados: preço, nota,
+        foto e desconto. O "De" é calculado do `priceDiscountRate` informado pela Shopee e só
+        quando o produto tem preço único (com variações não dá para saber a qual preço o
+        desconto se refere). Produtos que a API não devolve ficam de fora. Mantém o link do CSV.
+        """
+        if not self._has_valid_graphql_credentials():
+            logger.warning("SHOPEE_APP_KEY/SHOPEE_APP_SECRET ausentes; ofertas da Shopee sem dados da API.")
+            return ofertas
+
+        ids = [int(o["id"].removeprefix("SHOPEE")) for o in ofertas if o.get("id", "").removeprefix("SHOPEE").isdigit()]
+        nodes: dict[str, dict[str, Any]] = {}
+        for inicio in range(0, len(ids), lote):
+            nodes.update(self._consultar_lote_api(ids[inicio:inicio + lote]))
+
+        atualizadas: list[dict[str, Any]] = []
+        for oferta in ofertas:
+            node = nodes.get(oferta.get("id", "").removeprefix("SHOPEE"))
+            if not node:
+                continue
+            preco = self._parse_price(node.get("price"))
+            if not preco:
+                continue
+            taxa = node.get("priceDiscountRate") or 0
+            preco_unico = self._parse_price(node.get("priceMin")) == self._parse_price(node.get("priceMax"))
+            nota = self._parse_price(node.get("ratingStar"))
+            dados = {
+                **oferta,
+                "preco_promocional": preco,
+                "preco_original": round(preco / (1 - taxa / 100), 2) if preco_unico and 0 < taxa < 95 else None,
+                "avaliacao": nota if nota and nota <= 5 else None,
+                "imagem_url": node.get("imageUrl") or oferta.get("imagem_url"),
+            }
+            extras = {k: v for k, v in dados.items() if k not in ProdutoOferta.model_fields}
+            validada = ProdutoOferta(**{k: v for k, v in dados.items() if k in ProdutoOferta.model_fields})
+            atualizadas.append({**validada.model_dump(), **extras})
+
+        logger.info("API de Afiliados da Shopee: %d de %d ofertas atualizadas.", len(atualizadas), len(ofertas))
+        return atualizadas

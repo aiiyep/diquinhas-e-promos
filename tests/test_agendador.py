@@ -107,5 +107,6 @@ def test_ofertas_shopee_so_com_desconto_real_e_sem_masculino(monkeypatch, tmp_pa
     controle = Controle()
     controle.tentados = []
     monkeypatch.setattr(agendador.ShopeeExtractor, "buscar_imagem_oficial", lambda self, url: None)
+    monkeypatch.setattr(agendador.ShopeeExtractor, "atualizar_com_api", lambda self, ofertas: ofertas)
     assert not asyncio.run(agendador._disparar_ofertas_shopee("Ofertas", 0, controle))
     assert controle.tentados == ["SHOPEE4", "SHOPEE2"]

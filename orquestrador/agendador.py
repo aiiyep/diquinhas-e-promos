@@ -63,9 +63,10 @@ FONTES_SHOPEE: dict[str, dict[str, Any]] = {
     "k-beauty": {"pasta": KBEAUTY_CSV_DIR, "emojis": TOPIC_EMOJIS["k-beauty"], "por_marca": 1000,
                  "intercalar": True, "so_com_desconto": False},
 }
-# Metade Shopee do tópico Ofertas: mesmo critério do ML (desconto real, maior desconto primeiro)
+# Metade Shopee do tópico Ofertas: mesmo critério do ML (desconto real, maior desconto primeiro).
+# O CSV só lista os produtos; preço, desconto, nota e foto vêm na hora da Open API de Afiliados.
 OFERTAS_SHOPEE: dict[str, Any] = {"pasta": OFERTAS_CSV_DIR, "emojis": TOPIC_EMOJIS["ofertas"], "por_marca": 1000,
-                                  "intercalar": False, "so_com_desconto": True}
+                                  "intercalar": False, "so_com_desconto": True, "usar_api": True}
 
 # Quantos envios ao Telegram podem falhar seguidos antes de desistir do disparo
 MAX_FALHAS_ENVIO = 3
@@ -306,6 +307,8 @@ async def _disparar_shopee(
         emojis=fonte["emojis"],
         resolver_imagens=False,
     )
+    if fonte.get("usar_api"):
+        candidatos = await asyncio.to_thread(shopee_ext.atualizar_com_api, candidatos)
     if fonte["so_com_desconto"]:
         candidatos = sorted((c for c in candidatos if _desconto(c) > 0), key=_desconto, reverse=True)
     if fonte["intercalar"]:
