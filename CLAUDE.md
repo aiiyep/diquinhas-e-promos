@@ -25,6 +25,7 @@ Fluxo: `main.py` → `orquestrador/agendador.py` → extrator → `PromoFormatte
 - **Agendamento:** a tabela `BLOCOS` em `agendador.py` define cada job cron (fuso `America/Sao_Paulo`). Janelas que atravessam a hora cheia (ex.: 08:30–09:00) viram dois jobs, para não vazar disparos; a docstring do arquivo explica. `tests/test_agendador.py` confere os horários exatos de cada nicho, então atualize o `ESPERADO` ao mexer nos blocos.
 - **`disparar_oferta(nicho)`** decide a fonte pela categoria:
   - `beleza_premium` → CSVs da Shopee em `data/shopee/<marca>/` (`ShopeeExtractor`).
+  - `k-beauty` → CSVs da Shopee em `data/kbeauty/<loja>/`, alternando a loja a cada disparo (`FONTES_SHOPEE` + `_intercalar_por_marca`). Para atualizar, troque os CSVs exportados da Shopee Afiliados na pasta da loja.
   - `ofertas` → mais vendidos de Beleza pela API oficial do ML (`buscar_ofertas_mais_vendidos`), rodando entre as subcategorias de `OFERTAS_SUBCATEGORIAS`. Em Perfumes usa `buscar_ofertas_por_termos` com `PERFUMES_FEMININOS_TERMOS`, restrito ao domínio `MLB-PERFUMES`.
   - Demais nichos → busca no catálogo do ML rotacionando `NICHO_ROTATION_QUERIES`, páginas 0–2.
 - **Envio:** `_ControleEnvio` publica o primeiro produto inédito. Se o envio falhar, tenta o próximo, até `MAX_FALHAS_ENVIO` falhas seguidas. Cada disparo é gravado na tabela `disparos`, que alimenta o painel.

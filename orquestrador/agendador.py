@@ -38,6 +38,7 @@ from extractors.mercadolivre import (
     TOPIC_EMOJIS,
     MercadoLivreExtractor,
 )
+from extractors.filtros import eh_produto_masculino
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
 from publishers.telegram_publisher import publish_product_to_telegram
@@ -47,6 +48,15 @@ logger = logging.getLogger("diquinhas_e_promos.agendador")
 TIMEZONE = "America/Sao_Paulo"
 BASE_DIR = Path(__file__).resolve().parent.parent
 SHOPEE_CSV_DIR = BASE_DIR / "data" / "shopee"
+# CSVs da Shopee Afiliados do K-Beauty: uma subpasta por loja (glory-of-seoul, jadoo, ...)
+KBEAUTY_CSV_DIR = BASE_DIR / "data" / "kbeauty"
+
+# Como cada fonte de CSV da Shopee é lida: pasta, emojis e quantos produtos por loja/marca
+FONTES_SHOPEE: dict[str, dict[str, Any]] = {
+    "beleza_premium": {"pasta": SHOPEE_CSV_DIR, "emojis": "💎✨💄", "por_marca": 10, "intercalar": False},
+    # K-Beauty usa o catálogo inteiro de cada loja e alterna a loja a cada disparo
+    "k-beauty": {"pasta": KBEAUTY_CSV_DIR, "emojis": TOPIC_EMOJIS["k-beauty"], "por_marca": 1000, "intercalar": True},
+}
 
 # Quantos envios ao Telegram podem falhar seguidos antes de desistir do disparo
 MAX_FALHAS_ENVIO = 3
@@ -146,7 +156,6 @@ NICHO_ROTATION_QUERIES: dict[str, list[str]] = {
         "Kerastase Mascara",
         "Loreal Professionnel Absolut Repair",
     ],
-    # K-Beauty desativado temporariamente a pedido do usuário
 }
 
 NICHO_TO_CATEGORY: dict[str, str] = {
@@ -188,8 +197,10 @@ BLOCOS: list[dict[str, Any]] = [
     # BLOCO 5 (Moda): 18:00, 18:10, 18:20, 18:30
     {"id": "bloco_5_moda_18h", "nicho": "Moda", "hour": 18, "minute": "0-30/10",
      "name": "BLOCO 5 (Moda) - 18:00 às 18:30 (a cada 10 min)"},
+    # BLOCO 6 (K-Beauty / Shopee CSV): 19:00, 19:10, 19:20, 19:30
+    {"id": "bloco_6_kbeauty_19h", "nicho": "K-Beauty", "hour": 19, "minute": "0-30/10",
+     "name": "BLOCO 6 (K-Beauty) - 19:00 às 19:30 (a cada 10 min)"},
     # BLOCO 6 (Beleza Premium / Shopee CSV): 20:00, 20:10, 20:20, 20:30
-    # (ocupa a janela do K-Beauty, pausado a pedido do usuário)
     {"id": "bloco_6_beleza_premium_20h", "nicho": "Beleza Premium", "hour": 20, "minute": "0-30/10",
      "name": "BLOCO 6 (Beleza Premium) - 20:00 às 20:30 (a cada 10 min)"},
     # BLOCO 7 (Rosto e Corpo): 21:30, 21:36, 21:42, 21:48, 21:54 + fechamento 22:00
@@ -244,20 +255,46 @@ class _ControleEnvio:
         return False
 
 
-async def _disparar_shopee(nicho: str, controle: _ControleEnvio) -> bool:
+def _intercalar_por_marca(candidatos: list[dict[str, Any]], inicio: int) -> list[dict[str, Any]]:
+    """
+    Reordena os candidatos alternando entre as lojas/marcas (A1, B1, C1, A2, B2...), mantendo a
+    ordem de vendas dentro de cada uma. `inicio` escolhe a loja que abre a fila, para que
+    disparos seguidos comecem por lojas diferentes.
+    """
+    por_marca: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for cand in candidatos:
+        por_marca[cand.get("marca", "")].append(cand)
+    marcas = list(por_marca)
+    if not marcas:
+        return []
+    marcas = marcas[inicio % len(marcas):] + marcas[: inicio % len(marcas)]
+    filas = [por_marca[m] for m in marcas]
+    intercalados: list[dict[str, Any]] = []
+    for posicao in range(max(len(f) for f in filas)):
+        intercalados.extend(f[posicao] for f in filas if posicao < len(f))
+    return intercalados
+
+
+async def _disparar_shopee(nicho: str, categoria: str, idx: int, controle: _ControleEnvio) -> bool:
+    fonte = FONTES_SHOPEE[categoria]
     shopee_ext = ShopeeExtractor()
     candidatos = await asyncio.to_thread(
         shopee_ext.extrair_de_pastas_csv,
-        base_dir=SHOPEE_CSV_DIR,
-        por_marca=10,
-        categoria="beleza_premium",
-        emojis="💎✨💄",
+        base_dir=fonte["pasta"],
+        por_marca=fonte["por_marca"],
+        categoria=categoria,
+        emojis=fonte["emojis"],
         resolver_imagens=False,
     )
+    if fonte["intercalar"]:
+        candidatos = _intercalar_por_marca(candidatos, idx)
     for dados in candidatos:
         if controle.esgotado:
             break
         if db.foi_postado_recentemente(dados["id"]):
+            continue
+        if eh_produto_masculino(dados["titulo"]):
+            logger.info("Produto '%s' ignorado por ser masculino.", dados["titulo"][:40])
             continue
         if not dados.get("imagem_url"):
             dados["imagem_url"] = await asyncio.to_thread(
@@ -366,9 +403,6 @@ async def disparar_oferta(nicho: str) -> bool:
     logger.info("Extraindo 1 produto de %s", nicho)
 
     categoria = NICHO_TO_CATEGORY.get(nicho.strip().lower(), nicho.strip().lower())
-    if categoria == "k-beauty":
-        logger.info("Nicho 'K-Beauty' está pausado temporariamente; ignorando disparo.")
-        return False
 
     # Combina o contador em memória com o total já salvo no SQLite para manter a rotação mesmo após reboot do servidor
     idx = db.contar_postagens_nicho(nicho) + _sprint_counters[categoria]
@@ -376,12 +410,13 @@ async def disparar_oferta(nicho: str) -> bool:
 
     controle = _ControleEnvio(nicho)
     try:
-        if categoria == "beleza_premium":
-            if not SHOPEE_CSV_DIR.exists():
-                logger.warning("Pasta de CSVs da Shopee não encontrada em %s.", SHOPEE_CSV_DIR)
+        if categoria in FONTES_SHOPEE:
+            pasta = FONTES_SHOPEE[categoria]["pasta"]
+            if not pasta.exists():
+                logger.warning("Pasta de CSVs da Shopee não encontrada em %s.", pasta)
                 db.registrar_disparo(nicho, False, "Pasta de CSVs da Shopee não encontrada")
                 return False
-            sucesso = await _disparar_shopee(nicho, controle)
+            sucesso = await _disparar_shopee(nicho, categoria, idx, controle)
         elif categoria == "ofertas":
             sucesso = await _disparar_ofertas(nicho, idx, controle)
         else:
