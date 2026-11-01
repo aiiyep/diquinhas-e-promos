@@ -252,6 +252,10 @@ class _ControleEnvio:
                 preco=oferta_afiliada.get("preco_promocional"),
                 link=oferta_afiliada.get("link_produto"),
                 loja=oferta_afiliada.get("loja"),
+                preco_original=oferta_afiliada.get("preco_original"),
+                imagem_url=oferta_afiliada.get("imagem_url"),
+                avaliacao=oferta_afiliada.get("avaliacao"),
+                emojis=oferta_afiliada.get("emojis"),
             )
             self.publicado = str(oferta_afiliada.get("titulo") or produto_id)
             return True

@@ -13,7 +13,22 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent / "historico_ofertas.db"
 _TZ = ZoneInfo("America/Sao_Paulo")
 
 # Colunas de detalhe adicionadas depois da criação original da tabela (migração automática)
-_COLUNAS_DETALHE = {"titulo": "TEXT", "preco": "REAL", "link": "TEXT", "loja": "TEXT"}
+_COLUNAS_DETALHE = {
+    "titulo": "TEXT",
+    "preco": "REAL",
+    "link": "TEXT",
+    "loja": "TEXT",
+    # dados para montar o post do canal do WhatsApp (fila semiautomática do painel)
+    "preco_original": "REAL",
+    "imagem_url": "TEXT",
+    "avaliacao": "REAL",
+    "emojis": "TEXT",
+    "whatsapp": "TEXT",  # NULL = na fila; "postado" ou "pulado"
+    "whatsapp_em": "DATETIME",
+}
+
+# Status aceitos para um produto na fila do WhatsApp
+STATUS_WHATSAPP = ("postado", "pulado")
 
 
 def _agora() -> datetime:
@@ -100,26 +115,43 @@ class HistoricoDB:
         preco: Optional[float] = None,
         link: Optional[str] = None,
         loja: Optional[str] = None,
+        preco_original: Optional[float] = None,
+        imagem_url: Optional[str] = None,
+        avaliacao: Optional[float] = None,
+        emojis: Optional[str] = None,
     ) -> None:
         """
         Insere um novo registro ou atualiza a `data_envio` (UPSERT) de um produto recém-publicado.
+        Um produto repostado volta para a fila do WhatsApp.
         """
         agora_iso = _agora().isoformat(timespec="seconds")
         query = """
-        INSERT INTO ofertas_enviadas (id_produto, nicho, data_envio, titulo, preco, link, loja)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ofertas_enviadas (
+            id_produto, nicho, data_envio, titulo, preco, link, loja,
+            preco_original, imagem_url, avaliacao, emojis, whatsapp, whatsapp_em
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
         ON CONFLICT(id_produto) DO UPDATE SET
             nicho = excluded.nicho,
             data_envio = excluded.data_envio,
             titulo = excluded.titulo,
             preco = excluded.preco,
             link = excluded.link,
-            loja = excluded.loja;
+            loja = excluded.loja,
+            preco_original = excluded.preco_original,
+            imagem_url = excluded.imagem_url,
+            avaliacao = excluded.avaliacao,
+            emojis = excluded.emojis,
+            whatsapp = NULL,
+            whatsapp_em = NULL;
         """
         with self._conectar() as conn:
             conn.execute(
                 query,
-                (str(id_produto).strip(), str(nicho).strip(), agora_iso, titulo, preco, link, loja),
+                (
+                    str(id_produto).strip(), str(nicho).strip(), agora_iso, titulo, preco, link, loja,
+                    preco_original, imagem_url, avaliacao, emojis,
+                ),
             )
             conn.commit()
 
@@ -154,6 +186,46 @@ class HistoricoDB:
         with self._conectar() as conn:
             return [dict(row) for row in conn.execute(query, (limite,))]
 
+    def fila_whatsapp(self, horas: int = 48, limite: int = 40) -> list[dict[str, Any]]:
+        """
+        Postagens das últimas `horas` que ainda não foram postadas nem puladas no canal do
+        WhatsApp, do maior desconto para o menor (sem desconto por último) e, no empate, da
+        mais recente para a mais antiga.
+        """
+        desde = (_agora() - timedelta(hours=horas)).isoformat(timespec="seconds")
+        query = """
+        SELECT id_produto, nicho, data_envio, titulo, preco, preco_original, link, loja,
+               imagem_url, avaliacao, emojis
+        FROM ofertas_enviadas
+        WHERE whatsapp IS NULL AND data_envio >= ? AND link IS NOT NULL AND preco IS NOT NULL
+        ORDER BY
+            CASE WHEN preco_original > preco THEN 1.0 - preco / preco_original ELSE 0 END DESC,
+            data_envio DESC
+        LIMIT ?;
+        """
+        with self._conectar() as conn:
+            return [dict(row) for row in conn.execute(query, (desde, limite))]
+
+    def imagem_do_produto(self, id_produto: str) -> Optional[str]:
+        """URL da foto gravada para o produto (None se ele não existe ou não tem foto)."""
+        with self._conectar() as conn:
+            row = conn.execute(
+                "SELECT imagem_url FROM ofertas_enviadas WHERE id_produto = ?;", (str(id_produto).strip(),)
+            ).fetchone()
+        return row["imagem_url"] if row and row["imagem_url"] else None
+
+    def marcar_whatsapp(self, id_produto: str, status: str) -> bool:
+        """Marca um produto da fila como `postado` ou `pulado` no canal. True se ele existia."""
+        if status not in STATUS_WHATSAPP:
+            raise ValueError(f"Status do WhatsApp inválido: {status!r}")
+        with self._conectar() as conn:
+            cursor = conn.execute(
+                "UPDATE ofertas_enviadas SET whatsapp = ?, whatsapp_em = ? WHERE id_produto = ?;",
+                (status, _agora().isoformat(timespec="seconds"), str(id_produto).strip()),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
     def ultimos_disparos(self, limite: int = 30) -> list[dict[str, Any]]:
         query = "SELECT nicho, data, sucesso, detalhe FROM disparos ORDER BY id DESC LIMIT ?;"
         with self._conectar() as conn:
@@ -169,11 +241,15 @@ class HistoricoDB:
             falhas = conn.execute(
                 "SELECT COUNT(*) FROM disparos WHERE data >= ? AND sucesso = 0;", (hoje,)
             ).fetchone()[0]
+            whatsapp = conn.execute(
+                "SELECT COUNT(*) FROM ofertas_enviadas WHERE whatsapp = 'postado' AND whatsapp_em >= ?;", (hoje,)
+            ).fetchone()[0]
             ultimo = conn.execute(
                 "SELECT nicho, data, sucesso, detalhe FROM disparos ORDER BY id DESC LIMIT 1;"
             ).fetchone()
         return {
             "postagens_hoje": int(postagens),
             "falhas_hoje": int(falhas),
+            "whatsapp_hoje": int(whatsapp),
             "ultimo_disparo": {**dict(ultimo), "sucesso": bool(ultimo["sucesso"])} if ultimo else None,
         }

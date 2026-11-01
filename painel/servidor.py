@@ -14,17 +14,39 @@ import logging
 from pathlib import Path
 import threading
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.base import BaseScheduler
+import requests
 
-from database.historico_ofertas import HistoricoDB
+from database.historico_ofertas import STATUS_WHATSAPP, HistoricoDB
 from painel.logs import MemoriaLogHandler
+from publishers.whatsapp import percentual_desconto, montar_texto_whatsapp
 
 logger = logging.getLogger("diquinhas_e_promos.painel")
 
 _TZ = ZoneInfo("America/Sao_Paulo")
 _INDEX_HTML = Path(__file__).resolve().parent / "index.html"
+_FOTO_MAX_BYTES = 8 * 1024 * 1024
+
+
+def baixar_foto(url: str) -> tuple[bytes, str]:
+    """
+    Baixa a foto do produto para o painel repassar ao navegador. As CDNs das lojas não liberam
+    CORS, então a página não consegue ler a imagem direto para copiar ou compartilhar.
+    """
+    resp = requests.get(url, timeout=15, stream=True, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    tipo = resp.headers.get("Content-Type", "").split(";")[0].strip()
+    if not tipo.startswith("image/"):
+        raise ValueError(f"não é imagem: {tipo!r}")
+    corpo = b""
+    for pedaco in resp.iter_content(64 * 1024):
+        corpo += pedaco
+        if len(corpo) > _FOTO_MAX_BYTES:
+            raise ValueError("imagem grande demais")
+    return corpo, tipo
 
 
 def _formatar_data_db(valor: Optional[str]) -> str:
@@ -85,6 +107,26 @@ def montar_status(
     }
 
 
+def montar_fila_whatsapp(db: HistoricoDB) -> dict[str, Any]:
+    """Postagens recentes ainda não levadas ao canal do WhatsApp, com o texto pronto para colar."""
+    fila = []
+    for post in db.fila_whatsapp():
+        fila.append(
+            {
+                "id": post["id_produto"],
+                "nicho": post["nicho"],
+                "quando": _formatar_data_db(post["data_envio"]),
+                "titulo": post["titulo"],
+                "loja": post["loja"],
+                "imagem_url": post["imagem_url"],
+                "link": post["link"],
+                "desconto": percentual_desconto(post["preco_original"], post["preco"]),
+                "texto": montar_texto_whatsapp(post),
+            }
+        )
+    return {"fila": fila, "postados_hoje": db.resumo_do_dia()["whatsapp_hoje"]}
+
+
 def iniciar_painel(
     scheduler: BaseScheduler,
     db: HistoricoDB,
@@ -101,20 +143,65 @@ def iniciar_painel(
             if caminho == "/":
                 self._responder(200, "text/html; charset=utf-8", _INDEX_HTML.read_bytes())
             elif caminho == "/api/status":
-                try:
-                    corpo = json.dumps(montar_status(scheduler, db, logs, iniciado_em), ensure_ascii=False)
-                    self._responder(200, "application/json; charset=utf-8", corpo.encode("utf-8"))
-                except Exception as exc:
-                    logger.error("Erro ao montar status do painel: %s", exc)
-                    self._responder(500, "application/json; charset=utf-8", b'{"erro": "falha interna"}')
+                self._json(lambda: montar_status(scheduler, db, logs, iniciado_em))
+            elif caminho == "/api/whatsapp":
+                self._json(lambda: montar_fila_whatsapp(db))
+            elif caminho == "/api/whatsapp/foto":
+                self._foto()
             else:
                 self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
 
-        def _responder(self, status: int, tipo: str, corpo: bytes) -> None:
+        def do_POST(self) -> None:  # noqa: N802
+            caminho = self.path.split("?")[0]
+            if caminho != "/api/whatsapp/marcar":
+                self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
+                return
+            # Cabeçalho próprio: um formulário de outro site não consegue enviá-lo sem CORS
+            if self.headers.get("X-Painel") != "1":
+                self._responder(403, "application/json; charset=utf-8", b'{"erro": "proibido"}')
+                return
+            try:
+                tamanho = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                dados = json.loads(self.rfile.read(tamanho) or b"{}")
+                id_produto, status = str(dados.get("id") or ""), dados.get("status")
+            except (ValueError, AttributeError):
+                id_produto, status = "", None
+            if not id_produto or status not in STATUS_WHATSAPP:
+                self._responder(400, "application/json; charset=utf-8", b'{"erro": "id ou status invalido"}')
+                return
+            if not db.marcar_whatsapp(id_produto, status):
+                self._responder(404, "application/json; charset=utf-8", b'{"erro": "produto nao encontrado"}')
+                return
+            self._json(lambda: montar_fila_whatsapp(db))
+
+        def _foto(self) -> None:
+            # Só baixa a foto já gravada para o produto: o painel não vira proxy de URL qualquer
+            id_produto = (parse_qs(urlsplit(self.path).query).get("id") or [""])[0]
+            url = db.imagem_do_produto(id_produto) if id_produto else None
+            if not url or not url.startswith(("http://", "https://")):
+                self._responder(404, "text/plain; charset=utf-8", "Sem foto".encode("utf-8"))
+                return
+            try:
+                corpo, tipo = baixar_foto(url)
+            except Exception as exc:
+                logger.warning("Falha ao baixar a foto de %s: %s", id_produto, exc)
+                self._responder(502, "text/plain; charset=utf-8", "Falha ao baixar a foto".encode("utf-8"))
+                return
+            self._responder(200, tipo, corpo, cache="private, max-age=3600")
+
+        def _json(self, montar: Any) -> None:
+            try:
+                corpo = json.dumps(montar(), ensure_ascii=False)
+                self._responder(200, "application/json; charset=utf-8", corpo.encode("utf-8"))
+            except Exception as exc:
+                logger.error("Erro ao montar resposta do painel: %s", exc)
+                self._responder(500, "application/json; charset=utf-8", b'{"erro": "falha interna"}')
+
+        def _responder(self, status: int, tipo: str, corpo: bytes, cache: str = "no-store") -> None:
             self.send_response(status)
             self.send_header("Content-Type", tipo)
             self.send_header("Content-Length", str(len(corpo)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             self.end_headers()
             self.wfile.write(corpo)
 

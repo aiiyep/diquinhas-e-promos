@@ -41,7 +41,7 @@ def test_migra_banco_antigo_sem_colunas_de_detalhe(tmp_path):
 
 def test_disparos_e_resumo_do_dia(tmp_path):
     db = HistoricoDB(tmp_path / "h.db")
-    assert db.resumo_do_dia() == {"postagens_hoje": 0, "falhas_hoje": 0, "ultimo_disparo": None}
+    assert db.resumo_do_dia() == {"postagens_hoje": 0, "falhas_hoje": 0, "whatsapp_hoje": 0, "ultimo_disparo": None}
 
     db.registrar_postagem("MLB1", "Moda")
     db.registrar_disparo("Moda", True, "Vestido")
@@ -53,3 +53,40 @@ def test_disparos_e_resumo_do_dia(tmp_path):
     assert resumo["ultimo_disparo"]["nicho"] == "Unhas"
     assert resumo["ultimo_disparo"]["sucesso"] is False
     assert [d["sucesso"] for d in db.ultimos_disparos()] == [False, True]
+
+
+def test_fila_whatsapp_ordena_por_desconto_e_some_ao_marcar(tmp_path):
+    import pytest
+
+    db = HistoricoDB(tmp_path / "h.db")
+    db.registrar_postagem("SEM", "Moda", titulo="Sem desconto", preco=50.0, link="https://x.com/1")
+    db.registrar_postagem("D10", "Moda", titulo="10%", preco=90.0, preco_original=100.0, link="https://x.com/2")
+    db.registrar_postagem("D50", "Ofertas", titulo="50%", preco=50.0, preco_original=100.0, link="https://x.com/3",
+                          imagem_url="https://img/3.jpg", avaliacao=4.8, emojis="🔥")
+    db.registrar_postagem("SEMLINK", "Moda")  # registro antigo, sem dados para o post
+
+    assert [p["id_produto"] for p in db.fila_whatsapp()] == ["D50", "D10", "SEM"]
+    assert db.fila_whatsapp()[0]["imagem_url"] == "https://img/3.jpg"
+
+    assert db.marcar_whatsapp("D50", "postado")
+    assert db.marcar_whatsapp("SEM", "pulado")
+    assert not db.marcar_whatsapp("NAOEXISTE", "postado")
+    with pytest.raises(ValueError):
+        db.marcar_whatsapp("D10", "apagado")
+    assert [p["id_produto"] for p in db.fila_whatsapp()] == ["D10"]
+    assert db.resumo_do_dia()["whatsapp_hoje"] == 1
+
+    # repostado no Telegram depois da quarentena: volta para a fila
+    db.registrar_postagem("D50", "Ofertas", titulo="50%", preco=50.0, preco_original=100.0, link="https://x.com/3")
+    assert [p["id_produto"] for p in db.fila_whatsapp()] == ["D50", "D10"]
+
+
+def test_fila_whatsapp_ignora_postagens_antigas(tmp_path):
+    db = HistoricoDB(tmp_path / "h.db")
+    antiga = (datetime.now() - timedelta(days=3)).isoformat(timespec="seconds")
+    with sqlite3.connect(db.db_path) as conn:
+        conn.execute(
+            "INSERT INTO ofertas_enviadas (id_produto, nicho, data_envio, preco, link) VALUES (?, ?, ?, ?, ?)",
+            ("VELHO", "Moda", antiga, 10.0, "https://x.com"),
+        )
+    assert db.fila_whatsapp() == []
