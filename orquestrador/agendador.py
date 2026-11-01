@@ -23,6 +23,7 @@ Os blocos ficam declarados na tabela `BLOCOS` e são registrados por `configurar
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -41,6 +42,7 @@ from extractors.mercadolivre import (
 from extractors.filtros import eh_produto_masculino
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
+from orquestrador import instagram
 from publishers.telegram_publisher import publish_product_to_telegram
 
 logger = logging.getLogger("diquinhas_e_promos.agendador")
@@ -474,6 +476,43 @@ async def disparar_oferta(nicho: str) -> bool:
         return False
 
 
+async def preparar_instagram(slot: str) -> None:
+    """Uma hora antes do horário: monta o carrossel e deixa pendente de aprovação no painel."""
+    try:
+        await asyncio.to_thread(instagram.preparar_do_horario, db, slot)
+    except Exception as exc:
+        logger.error("Erro ao preparar o carrossel '%s' do Instagram: %s", slot, exc)
+        db.registrar_disparo("Instagram", False, f"Erro ao preparar '{slot}': {exc}")
+
+
+async def publicar_instagram(slot: str) -> None:
+    """No horário: publica o carrossel aprovado (ou expira o que ficou pendente)."""
+    try:
+        await asyncio.to_thread(instagram.publicar_do_horario, db, slot)
+    except Exception as exc:
+        logger.error("Erro ao publicar o carrossel '%s' do Instagram: %s", slot, exc)
+        db.registrar_disparo("Instagram", False, f"Erro ao publicar '{slot}': {exc}")
+
+
+def _registrar_jobs_instagram(target_scheduler: AsyncIOScheduler) -> None:
+    for slot, hora, minuto in instagram.horarios():
+        publicar_em = datetime(2000, 1, 1, hora, minuto)
+        preparar_em = publicar_em - instagram.ANTECEDENCIA
+        nome = instagram.FORMATOS[slot.chave].nome
+        target_scheduler.add_job(
+            preparar_instagram, trigger="cron", hour=preparar_em.hour, minute=preparar_em.minute,
+            args=[slot.chave], id=f"instagram_preparar_{slot.chave}",
+            name=f"INSTAGRAM - preparar '{nome}' ({preparar_em:%H:%M})",
+            replace_existing=True, misfire_grace_time=1800,
+        )
+        target_scheduler.add_job(
+            publicar_instagram, trigger="cron", hour=hora, minute=minuto,
+            args=[slot.chave], id=f"instagram_publicar_{slot.chave}",
+            name=f"INSTAGRAM - publicar '{nome}' ({publicar_em:%H:%M})",
+            replace_existing=True, misfire_grace_time=600,
+        )
+
+
 def configurar_agendador(sched: Optional[AsyncIOScheduler] = None) -> AsyncIOScheduler:
     """
     Registra os Sprints da tabela `BLOCOS` no AsyncIOScheduler usando o gatilho `cron`
@@ -493,6 +532,8 @@ def configurar_agendador(sched: Optional[AsyncIOScheduler] = None) -> AsyncIOSch
             replace_existing=True,
             misfire_grace_time=120,
         )
+    if instagram.instagram_ativo():
+        _registrar_jobs_instagram(target_scheduler)
 
     logger.info(
         "Agendador configurado com %d jobs CRON no fuso '%s'.",
