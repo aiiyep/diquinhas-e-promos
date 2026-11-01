@@ -92,6 +92,21 @@
   .log.WARNING .n { color: var(--warn); }
   .log.ERROR .n, .log.CRITICAL .n { color: var(--bad); }
   .log.INFO .n { color: var(--muted); }
+  .wa-info { color: var(--muted); font-size: 13px; font-weight: 400; }
+  .wa-dica { color: var(--muted); font-size: 13px; margin: -4px 0 12px; }
+  .wa-lista { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .wa-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .wa-item.feito { opacity: .45; }
+  .wa-topo { display: flex; gap: 10px; align-items: flex-start; }
+  .wa-topo img { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; background: var(--bg); flex: none; }
+  .wa-topo .sem-foto { width: 84px; height: 84px; border-radius: 8px; background: var(--bg); color: var(--muted); font-size: 12px; display: grid; place-items: center; flex: none; }
+  .wa-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+  .wa-titulo { font-weight: 500; overflow-wrap: anywhere; }
+  .wa-texto { font: 12.5px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 8px; padding: 8px; margin: 0; max-height: 9.5em; overflow: auto; }
+  .wa-botoes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+  .wa-botoes .principal { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .wa-botoes a { font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; }
+  .wa-mais { margin-top: 12px; }
   @media (max-width: 600px) {
     .log { grid-template-columns: 1fr; gap: 0; }
     .log .q, .log .n { display: inline; }
@@ -111,7 +126,15 @@
     <div class="card"><div class="rotulo">Próximo disparo</div><div class="valor" id="prox-em">–</div><div class="extra" id="prox-nicho"></div></div>
     <div class="card"><div class="rotulo">Postagens hoje</div><div class="valor" id="post-hoje">–</div><div class="extra" id="ultimo"></div></div>
     <div class="card" id="card-falhas"><div class="rotulo">Falhas hoje</div><div class="valor" id="falhas-hoje">–</div></div>
+    <div class="card"><div class="rotulo">No WhatsApp hoje</div><div class="valor" id="wa-hoje">–</div><div class="extra" id="wa-fila-total"></div></div>
   </div>
+
+  <section id="whatsapp">
+    <h2>Canal do WhatsApp <span class="wa-info" id="wa-info"></span></h2>
+    <p class="wa-dica">Postagens das últimas 48h, do maior desconto para o menor. Copie o texto, segure a foto para salvar e cole os dois no canal.</p>
+    <div class="wa-lista" id="wa-lista"></div>
+    <button class="wa-mais" id="wa-mais" hidden>Mostrar todas</button>
+  </section>
 
   <div class="grid2">
     <section>
@@ -267,8 +290,112 @@
   }));
   $("busca").addEventListener("input", renderLogs);
 
+  // ---- Fila do canal do WhatsApp (semiautomático: copiar e colar) ----
+  const WA_VISIVEIS = 8;
+  let waFila = [];
+  let waTodas = false;
+  let waAssinatura = "";
+
+  async function copiarTexto(texto) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(texto);
+      return;
+    }
+    // Painel servido em http (Tailscale): a API de área de transferência não existe, usa o modo antigo
+    const area = el("textarea", { readonly: "", style: "position:fixed;top:0;left:0;opacity:0" });
+    area.value = texto;
+    document.body.append(area);
+    area.focus();
+    area.setSelectionRange(0, texto.length);
+    const ok = document.execCommand("copy");
+    area.remove();
+    if (!ok) throw new Error("cópia bloqueada");
+  }
+
+  async function marcar(id, status) {
+    const resp = await fetch("/api/whatsapp/marcar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Painel": "1" },
+      body: JSON.stringify({ id, status }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    renderFila(await resp.json());
+  }
+
+  function itemFila(p) {
+    const foto = p.imagem_url
+      ? el("img", { src: p.imagem_url, alt: p.titulo || "", loading: "lazy", referrerpolicy: "no-referrer" })
+      : el("div", { class: "sem-foto", text: "sem foto" });
+    const meta = el("div", { class: "wa-meta" }, el("span", { class: "tag warn", text: p.nicho }));
+    if (p.desconto) meta.append(el("span", { class: "tag ok", text: `${p.desconto}% OFF` }));
+    meta.append(el("span", { class: "tag", text: p.quando }));
+
+    const copiar = el("button", { class: "principal", text: "Copiar texto" });
+    const item = el("div", { class: "wa-item" },
+      el("div", { class: "wa-topo" }, foto, el("div", {}, meta, el("div", { class: "wa-titulo", text: p.titulo || p.id }))),
+      el("pre", { class: "wa-texto", text: p.texto }));
+    const botoes = el("div", { class: "wa-botoes" }, copiar);
+    if (p.imagem_url && /^https?:\/\//.test(p.imagem_url)) {
+      botoes.append(el("a", { href: p.imagem_url, target: "_blank", rel: "noopener noreferrer", text: "Abrir foto" }));
+    }
+    const postei = el("button", { text: "✓ Postei" });
+    const pular = el("button", { text: "Pular" });
+    botoes.append(postei, pular);
+    item.append(botoes);
+
+    copiar.addEventListener("click", async () => {
+      try {
+        await copiarTexto(p.texto);
+        copiar.textContent = "Copiado!";
+      } catch {
+        copiar.textContent = "Selecione e copie";
+        const sel = window.getSelection();
+        sel.selectAllChildren(item.querySelector(".wa-texto"));
+      }
+      setTimeout(() => { copiar.textContent = "Copiar texto"; }, 2500);
+    });
+    for (const [botao, status] of [[postei, "postado"], [pular, "pulado"]]) {
+      botao.addEventListener("click", async () => {
+        item.classList.add("feito");
+        try { await marcar(p.id, status); } catch (e) {
+          item.classList.remove("feito");
+          botao.textContent = `erro (${e.message})`;
+        }
+      });
+    }
+    return item;
+  }
+
+  function renderFila(dados) {
+    waFila = dados.fila;
+    waAssinatura = waFila.map((p) => p.id).join(",");
+    $("wa-hoje").textContent = dados.postados_hoje;
+    $("wa-fila-total").textContent = `${waFila.length} na fila`;
+    $("wa-info").textContent = `${waFila.length} na fila`;
+    const visiveis = waTodas ? waFila : waFila.slice(0, WA_VISIVEIS);
+    $("wa-lista").replaceChildren(...(visiveis.length ? visiveis.map(itemFila) :
+      [el("div", { class: "vazio", text: "Nada na fila: tudo das últimas 48h já foi postado ou pulado." })]));
+    $("wa-mais").hidden = waFila.length <= WA_VISIVEIS;
+    $("wa-mais").textContent = waTodas ? "Mostrar menos" : `Mostrar todas (${waFila.length})`;
+  }
+
+  async function atualizarFila() {
+    try {
+      const resp = await fetch("/api/whatsapp", { cache: "no-store" });
+      if (!resp.ok) return;
+      const dados = await resp.json();
+      // Só redesenha se a fila mudou, para não perder o que está sendo copiado
+      if (dados.fila.map((p) => p.id).join(",") !== waAssinatura || !waFila.length) renderFila(dados);
+      else $("wa-hoje").textContent = dados.postados_hoje;
+    } catch { /* o aviso de conexão já aparece no topo */ }
+  }
+
+  $("wa-mais").addEventListener("click", () => { waTodas = !waTodas; renderFila({ fila: waFila, postados_hoje: $("wa-hoje").textContent }); });
+
   atualizar();
   setInterval(atualizar, 10000);
+  atualizarFila();
+  setInterval(() => { if (!pausado) atualizarFila(); }, 60000);
 </script>
 </body>
 </html>

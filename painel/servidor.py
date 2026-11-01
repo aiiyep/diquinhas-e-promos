@@ -18,8 +18,9 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.base import BaseScheduler
 
-from database.historico_ofertas import HistoricoDB
+from database.historico_ofertas import STATUS_WHATSAPP, HistoricoDB
 from painel.logs import MemoriaLogHandler
+from publishers.whatsapp import percentual_desconto, montar_texto_whatsapp
 
 logger = logging.getLogger("diquinhas_e_promos.painel")
 
@@ -85,6 +86,26 @@ def montar_status(
     }
 
 
+def montar_fila_whatsapp(db: HistoricoDB) -> dict[str, Any]:
+    """Postagens recentes ainda não levadas ao canal do WhatsApp, com o texto pronto para colar."""
+    fila = []
+    for post in db.fila_whatsapp():
+        fila.append(
+            {
+                "id": post["id_produto"],
+                "nicho": post["nicho"],
+                "quando": _formatar_data_db(post["data_envio"]),
+                "titulo": post["titulo"],
+                "loja": post["loja"],
+                "imagem_url": post["imagem_url"],
+                "link": post["link"],
+                "desconto": percentual_desconto(post["preco_original"], post["preco"]),
+                "texto": montar_texto_whatsapp(post),
+            }
+        )
+    return {"fila": fila, "postados_hoje": db.resumo_do_dia()["whatsapp_hoje"]}
+
+
 def iniciar_painel(
     scheduler: BaseScheduler,
     db: HistoricoDB,
@@ -101,14 +122,42 @@ def iniciar_painel(
             if caminho == "/":
                 self._responder(200, "text/html; charset=utf-8", _INDEX_HTML.read_bytes())
             elif caminho == "/api/status":
-                try:
-                    corpo = json.dumps(montar_status(scheduler, db, logs, iniciado_em), ensure_ascii=False)
-                    self._responder(200, "application/json; charset=utf-8", corpo.encode("utf-8"))
-                except Exception as exc:
-                    logger.error("Erro ao montar status do painel: %s", exc)
-                    self._responder(500, "application/json; charset=utf-8", b'{"erro": "falha interna"}')
+                self._json(lambda: montar_status(scheduler, db, logs, iniciado_em))
+            elif caminho == "/api/whatsapp":
+                self._json(lambda: montar_fila_whatsapp(db))
             else:
                 self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
+
+        def do_POST(self) -> None:  # noqa: N802
+            caminho = self.path.split("?")[0]
+            if caminho != "/api/whatsapp/marcar":
+                self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
+                return
+            # Cabeçalho próprio: um formulário de outro site não consegue enviá-lo sem CORS
+            if self.headers.get("X-Painel") != "1":
+                self._responder(403, "application/json; charset=utf-8", b'{"erro": "proibido"}')
+                return
+            try:
+                tamanho = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                dados = json.loads(self.rfile.read(tamanho) or b"{}")
+                id_produto, status = str(dados.get("id") or ""), dados.get("status")
+            except (ValueError, AttributeError):
+                id_produto, status = "", None
+            if not id_produto or status not in STATUS_WHATSAPP:
+                self._responder(400, "application/json; charset=utf-8", b'{"erro": "id ou status invalido"}')
+                return
+            if not db.marcar_whatsapp(id_produto, status):
+                self._responder(404, "application/json; charset=utf-8", b'{"erro": "produto nao encontrado"}')
+                return
+            self._json(lambda: montar_fila_whatsapp(db))
+
+        def _json(self, montar: Any) -> None:
+            try:
+                corpo = json.dumps(montar(), ensure_ascii=False)
+                self._responder(200, "application/json; charset=utf-8", corpo.encode("utf-8"))
+            except Exception as exc:
+                logger.error("Erro ao montar resposta do painel: %s", exc)
+                self._responder(500, "application/json; charset=utf-8", b'{"erro": "falha interna"}')
 
         def _responder(self, status: int, tipo: str, corpo: bytes) -> None:
             self.send_response(status)

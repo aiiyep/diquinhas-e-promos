@@ -35,6 +35,7 @@ Fluxo: `main.py` → `orquestrador/agendador.py` → extrator → `PromoFormatte
 - **`publishers/telegram_publisher.py`**: monta a legenda em HTML, com título e link escapados, e reaproveita um único `Bot`. O tópico é escolhido por `_resolve_thread_id(categoria)` a partir das variáveis `THREAD_ID_*` do `.env`.
 - **`config.py`**: carrega o `.env` uma vez. Use `env("NOME")` em vez de `os.getenv`/`load_dotenv` espalhados.
 - **Painel web (`painel/`)**: `http.server` da biblioteca padrão, numa thread, iniciado por `main.py`. Mostra `/` (index.html) e `/api/status` (JSON). Escuta em `PAINEL_HOST`:`PAINEL_PORTA`.
+- **Canal do WhatsApp (semiautomático):** não há envio automático (a API oficial não posta em canais e as não oficiais arriscam banir o número). O painel mostra a fila (`GET /api/whatsapp`: postagens das últimas 48h ainda não levadas ao canal, do maior desconto para o menor, com o texto de `publishers/whatsapp.py`); cada item é marcado como postado ou pulado (`POST /api/whatsapp/marcar`, exige o cabeçalho `X-Painel: 1`). O status fica nas colunas `whatsapp`/`whatsapp_em` de `ofertas_enviadas`.
 - **I/O bloqueante:** as chamadas `requests` rodam via `asyncio.to_thread` dentro das corrotinas do agendador. Não chame HTTP síncrono direto no event loop.
 
 ## Restrições da API do Mercado Livre

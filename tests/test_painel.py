@@ -56,3 +56,36 @@ def test_pagina_e_404(painel):
     with pytest.raises(urllib.error.HTTPError) as erro:
         urllib.request.urlopen(f"{painel}/nada")
     assert erro.value.code == 404
+
+
+def _post(url, corpo, cabecalho=True):
+    req = urllib.request.Request(
+        url, data=json.dumps(corpo).encode(), method="POST",
+        headers={"Content-Type": "application/json", **({"X-Painel": "1"} if cabecalho else {})},
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
+
+
+def test_fila_whatsapp_e_marcar(painel):
+    with urllib.request.urlopen(f"{painel}/api/whatsapp") as resp:
+        dados = json.loads(resp.read())
+    [item] = dados["fila"]
+    assert item["id"] == "MLB1" and item["nicho"] == "Moda"
+    assert item["texto"].startswith("🔥 *Vestido <b>Midi</b>*")
+    assert "R$ 89,90" in item["texto"] and "https://x.com" in item["texto"]
+
+    depois = _post(f"{painel}/api/whatsapp/marcar", {"id": "MLB1", "status": "postado"})
+    assert depois == {"fila": [], "postados_hoje": 1}
+
+
+def test_marcar_whatsapp_rejeita_pedidos_invalidos(painel):
+    casos = [
+        ({"id": "MLB1", "status": "postado"}, False, 403),  # sem o cabeçalho do painel
+        ({"id": "MLB1", "status": "apagado"}, True, 400),
+        ({"id": "NAOEXISTE", "status": "postado"}, True, 404),
+    ]
+    for corpo, cabecalho, codigo in casos:
+        with pytest.raises(urllib.error.HTTPError) as erro:
+            _post(f"{painel}/api/whatsapp/marcar", corpo, cabecalho)
+        assert erro.value.code == codigo
