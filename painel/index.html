@@ -311,6 +311,8 @@
   let waFila = [];
   let waTodas = false;
   let waAssinatura = "";
+  // Muda quando entra/sai produto OU quando o texto muda (ex.: deploy que encurtou os links)
+  const assinaturaFila = (fila) => JSON.stringify(fila.map((p) => [p.id, p.texto]));
 
   async function copiarTexto(texto) {
     if (navigator.clipboard && window.isSecureContext) {
@@ -462,7 +464,7 @@
 
   function renderFila(dados) {
     waFila = dados.fila;
-    waAssinatura = waFila.map((p) => p.id).join(",");
+    waAssinatura = assinaturaFila(waFila);
     $("wa-hoje").textContent = dados.postados_hoje;
     $("wa-fila-total").textContent = `${waFila.length} na fila`;
     $("wa-info").textContent = `${waFila.length} na fila`;
@@ -479,7 +481,7 @@
       if (!resp.ok) return;
       const dados = await resp.json();
       // Só redesenha se a fila mudou, para não perder o que está sendo copiado
-      if (dados.fila.map((p) => p.id).join(",") !== waAssinatura || !waFila.length) renderFila(dados);
+      if (assinaturaFila(dados.fila) !== waAssinatura || !waFila.length) renderFila(dados);
       else $("wa-hoje").textContent = dados.postados_hoje;
     } catch { /* o aviso de conexão já aparece no topo */ }
   }
