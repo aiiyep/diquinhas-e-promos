@@ -342,8 +342,16 @@
     return new Promise((ok, falha) => canvas.toBlob(b => b ? ok(b) : falha(new Error("conversão")), "image/png"));
   }
 
-  async function compartilhar(p) {
-    const blob = await baixarFoto(p.id);
+  async function compartilhar(p, temFoto) {
+    // Postagem sem foto gravada (as de antes da fila existir): compartilha só o texto
+    let blob = null;
+    if (temFoto) {
+      try { blob = await baixarFoto(p.id); } catch { blob = null; }
+    }
+    if (!blob) {
+      await navigator.share({ text: p.texto });
+      return;
+    }
     const ext = (blob.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
     const arquivo = new File([blob], `oferta-${p.id}.${ext}`, { type: blob.type });
     const dados = { files: [arquivo], text: p.texto };
@@ -379,17 +387,17 @@
       el("pre", { class: "wa-texto", text: p.texto }));
     const botoes = el("div", { class: "wa-botoes" });
     const temFoto = p.imagem_url && /^https?:\/\//.test(p.imagem_url);
-    if (temFoto && PODE_COMPARTILHAR) {
+    if (PODE_COMPARTILHAR) {
       const share = el("button", { class: "principal", text: "Compartilhar" });
       share.addEventListener("click", async () => {
-        try { await compartilhar(p); } catch (e) {
+        try { await compartilhar(p, temFoto); } catch (e) {
           if (e.name !== "AbortError") piscar(share, "falhou", "Compartilhar");
         }
       });
       botoes.append(share);
       copiar.classList.remove("principal");
       // Baixa antes do clique: o navegador só abre o compartilhamento logo após o toque
-      baixarFoto(p.id).catch(() => {});
+      if (temFoto) baixarFoto(p.id).catch(() => {});
     }
     botoes.append(copiar);
     if (temFoto && PODE_COPIAR_FOTO) {
