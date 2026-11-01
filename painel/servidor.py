@@ -160,7 +160,6 @@ def montar_instagram(db: HistoricoDB) -> dict[str, Any]:
         )
     return {
         "posts": posts,
-        "automatico": instagram.publicacao_automatica(),
         "horarios": [f"{h:02d}:{m:02d}" for _, h, m in instagram.horarios()],
     }
 
