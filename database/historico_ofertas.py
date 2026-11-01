@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import json
 import logging
 from pathlib import Path
 import sqlite3
@@ -29,6 +30,12 @@ _COLUNAS_DETALHE = {
 
 # Status aceitos para um produto na fila do WhatsApp
 STATUS_WHATSAPP = ("postado", "pulado")
+
+# Ciclo de um carrossel do Instagram: pendente → aprovado → publicado. Sem aprovação até a hora
+# vira "expirado"; "substituido" é o que foi trocado por "Gerar outro" no painel.
+STATUS_INSTAGRAM = ("pendente", "aprovado", "publicado", "descartado", "expirado", "falhou", "substituido")
+# Status em que os produtos do carrossel contam como "já usados" no Instagram
+_STATUS_INSTAGRAM_OCUPA = ("pendente", "aprovado", "publicado", "falhou")
 
 
 def _agora() -> datetime:
@@ -76,6 +83,27 @@ class HistoricoDB:
                     data DATETIME NOT NULL,
                     sucesso INTEGER NOT NULL,
                     detalhe TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS instagram_posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slot TEXT NOT NULL,
+                    agendado_para DATETIME NOT NULL,
+                    criado_em DATETIME NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pendente',
+                    titulo TEXT,
+                    legenda TEXT,
+                    produtos TEXT NOT NULL,
+                    pasta TEXT,
+                    n_cards INTEGER NOT NULL DEFAULT 0,
+                    usou_ia INTEGER NOT NULL DEFAULT 0,
+                    status_em DATETIME,
+                    erro TEXT,
+                    ig_media_id TEXT,
+                    fb_post_id TEXT
                 );
                 """
             )
@@ -223,6 +251,101 @@ class HistoricoDB:
                 "UPDATE ofertas_enviadas SET whatsapp = ?, whatsapp_em = ? WHERE id_produto = ?;",
                 (status, _agora().isoformat(timespec="seconds"), str(id_produto).strip()),
             )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------ Instagram
+
+    def candidatos_instagram(self, horas: int = 72) -> list[dict[str, Any]]:
+        """Postagens do Telegram das últimas `horas` com foto e preço (matéria-prima dos carrosséis)."""
+        desde = (_agora() - timedelta(hours=horas)).isoformat(timespec="seconds")
+        query = """
+        SELECT id_produto, nicho, data_envio, titulo, preco, preco_original, link, loja, imagem_url, avaliacao
+        FROM ofertas_enviadas
+        WHERE data_envio >= ? AND imagem_url IS NOT NULL AND imagem_url != '' AND preco IS NOT NULL
+        ORDER BY data_envio DESC;
+        """
+        with self._conectar() as conn:
+            return [dict(row) for row in conn.execute(query, (desde,))]
+
+    def produtos_usados_instagram(self, dias: int = 14) -> dict[str, str]:
+        """{id: título} dos produtos que já estão num carrossel ativo ou publicado nos últimos `dias`."""
+        desde = (_agora() - timedelta(days=dias)).isoformat(timespec="seconds")
+        marcadores = ",".join("?" * len(_STATUS_INSTAGRAM_OCUPA))
+        query = f"SELECT produtos FROM instagram_posts WHERE criado_em >= ? AND status IN ({marcadores});"
+        usados: dict[str, str] = {}
+        with self._conectar() as conn:
+            for row in conn.execute(query, (desde, *_STATUS_INSTAGRAM_OCUPA)):
+                for p in json.loads(row["produtos"] or "[]"):
+                    usados[str(p.get("id"))] = str(p.get("titulo") or "")
+        return usados
+
+    def criar_post_instagram(
+        self,
+        slot: str,
+        agendado_para: datetime,
+        titulo: str,
+        legenda: str,
+        produtos: list[dict[str, Any]],
+        pasta: str,
+        n_cards: int,
+        usou_ia: bool,
+    ) -> int:
+        agora = _agora().isoformat(timespec="seconds")
+        with self._conectar() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO instagram_posts
+                    (slot, agendado_para, criado_em, status, titulo, legenda, produtos, pasta, n_cards, usou_ia, status_em)
+                VALUES (?, ?, ?, 'pendente', ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    slot, agendado_para.replace(tzinfo=None).isoformat(timespec="seconds"), agora, titulo, legenda,
+                    json.dumps(produtos, ensure_ascii=False), pasta, n_cards, int(usou_ia), agora,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    @staticmethod
+    def _post_instagram(row: sqlite3.Row) -> dict[str, Any]:
+        post = dict(row)
+        post["produtos"] = json.loads(post["produtos"] or "[]")
+        post["usou_ia"] = bool(post["usou_ia"])
+        return post
+
+    def post_instagram(self, post_id: int) -> Optional[dict[str, Any]]:
+        with self._conectar() as conn:
+            row = conn.execute("SELECT * FROM instagram_posts WHERE id = ?;", (int(post_id),)).fetchone()
+        return self._post_instagram(row) if row else None
+
+    def posts_instagram(self, limite: int = 12) -> list[dict[str, Any]]:
+        """Carrosséis mais recentes (pelo horário de publicação), menos os substituídos."""
+        query = """
+        SELECT * FROM instagram_posts WHERE status != 'substituido'
+        ORDER BY agendado_para DESC, id DESC LIMIT ?;
+        """
+        with self._conectar() as conn:
+            return [self._post_instagram(row) for row in conn.execute(query, (limite,))]
+
+    def posts_instagram_do_horario(self, slot: str, agendado_para: datetime) -> list[dict[str, Any]]:
+        query = """
+        SELECT * FROM instagram_posts WHERE slot = ? AND agendado_para = ? AND status != 'substituido'
+        ORDER BY id DESC;
+        """
+        quando = agendado_para.replace(tzinfo=None).isoformat(timespec="seconds")
+        with self._conectar() as conn:
+            return [self._post_instagram(row) for row in conn.execute(query, (slot, quando))]
+
+    def atualizar_post_instagram(self, post_id: int, status: str, **campos: Any) -> bool:
+        """Muda o status (e, opcionalmente, `erro`, `ig_media_id`, `fb_post_id`). True se o post existia."""
+        if status not in STATUS_INSTAGRAM:
+            raise ValueError(f"Status do Instagram inválido: {status!r}")
+        permitidos = {k: v for k, v in campos.items() if k in ("erro", "ig_media_id", "fb_post_id")}
+        sets = ", ".join(["status = ?", "status_em = ?", *(f"{k} = ?" for k in permitidos)])
+        valores = [status, _agora().isoformat(timespec="seconds"), *permitidos.values(), int(post_id)]
+        with self._conectar() as conn:
+            cursor = conn.execute(f"UPDATE instagram_posts SET {sets} WHERE id = ?;", valores)
             conn.commit()
         return cursor.rowcount > 0
 

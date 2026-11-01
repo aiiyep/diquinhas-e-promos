@@ -21,6 +21,7 @@ from apscheduler.schedulers.base import BaseScheduler
 import requests
 
 from database.historico_ofertas import STATUS_WHATSAPP, HistoricoDB
+from orquestrador import instagram
 from painel.logs import MemoriaLogHandler
 from publishers.whatsapp import percentual_desconto, montar_texto_whatsapp
 
@@ -76,7 +77,7 @@ def montar_status(
         quando = quando.astimezone(_TZ)
         proximos.append(
             {
-                "nicho": job.args[0] if job.args else "",
+                "nicho": "Instagram" if job.id.startswith("instagram_") else (job.args[0] if job.args else ""),
                 "nome": job.name,
                 "quando": quando.strftime("%d/%m %H:%M"),
                 "em_segundos": max(0, int((quando - agora).total_seconds())),
@@ -127,6 +128,76 @@ def montar_fila_whatsapp(db: HistoricoDB) -> dict[str, Any]:
     return {"fila": fila, "postados_hoje": db.resumo_do_dia()["whatsapp_hoje"]}
 
 
+# Ações do painel sobre um carrossel e de quais status cada uma parte
+_ACOES_INSTAGRAM = {
+    "aprovar": (("pendente", "expirado"), "aprovado"),
+    "desaprovar": (("aprovado",), "pendente"),
+    "descartar": (("pendente", "aprovado", "expirado", "falhou"), "descartado"),
+    "publicado": (("pendente", "aprovado", "expirado", "falhou"), "publicado"),  # publicado à mão
+}
+
+
+def montar_instagram(db: HistoricoDB) -> dict[str, Any]:
+    posts = []
+    for post in db.posts_instagram(9):
+        posts.append(
+            {
+                "id": post["id"],
+                "formato": instagram.FORMATOS[post["slot"]].nome if post["slot"] in instagram.FORMATOS else post["slot"],
+                "agendado": _formatar_data_db(post["agendado_para"]),
+                "status": post["status"],
+                "titulo": post["titulo"],
+                "legenda": post["legenda"],
+                "n_cards": post["n_cards"],
+                "usou_ia": post["usou_ia"],
+                "erro": post["erro"],
+                "produtos": [
+                    {"nome": p.get("nome") or p.get("titulo"), "preco": p.get("preco"), "desconto": p.get("desconto")}
+                    for p in post["produtos"]
+                ],
+            }
+        )
+    return {
+        "posts": posts,
+        "automatico": instagram.publicacao_automatica(),
+        "horarios": [f"{h:02d}:{m:02d}" for _, h, m in instagram.horarios()],
+    }
+
+
+def caminho_card(db: HistoricoDB, post_id: str, indice: str) -> Optional[Path]:
+    """Arquivo de um card, só dentro da pasta gravada para o post."""
+    try:
+        post = db.post_instagram(int(post_id))
+        n = int(indice)
+    except (TypeError, ValueError):
+        return None
+    if not post or not post["pasta"] or not 0 <= n < post["n_cards"]:
+        return None
+    arquivo = Path(post["pasta"]) / f"{n:02d}.jpg"
+    return arquivo if arquivo.is_file() else None
+
+
+def acao_instagram(db: HistoricoDB, post_id: Any, acao: Any) -> tuple[int, str]:
+    """Aplica a ação do painel. Devolve (status HTTP, mensagem de erro ou "")."""
+    try:
+        post = db.post_instagram(int(post_id))
+    except (TypeError, ValueError):
+        return 400, "id inválido"
+    if not post:
+        return 404, "carrossel não encontrado"
+    if acao == "regerar":
+        if instagram.regerar_post(db, post["id"]) is None:
+            return 409, "não deu para montar outro (faltam produtos inéditos?)"
+        return 200, ""
+    if acao not in _ACOES_INSTAGRAM:
+        return 400, "ação inválida"
+    origens, destino = _ACOES_INSTAGRAM[acao]
+    if post["status"] not in origens:
+        return 409, f"carrossel está '{post['status']}'"
+    db.atualizar_post_instagram(post["id"], destino)
+    return 200, ""
+
+
 def iniciar_painel(
     scheduler: BaseScheduler,
     db: HistoricoDB,
@@ -148,12 +219,21 @@ def iniciar_painel(
                 self._json(lambda: montar_fila_whatsapp(db))
             elif caminho == "/api/whatsapp/foto":
                 self._foto()
+            elif caminho == "/api/instagram":
+                self._json(lambda: montar_instagram(db))
+            elif caminho == "/api/instagram/card":
+                consulta = parse_qs(urlsplit(self.path).query)
+                arquivo = caminho_card(db, (consulta.get("id") or [""])[0], (consulta.get("n") or [""])[0])
+                if arquivo is None:
+                    self._responder(404, "text/plain; charset=utf-8", "Card não encontrado".encode("utf-8"))
+                else:
+                    self._responder(200, "image/jpeg", arquivo.read_bytes(), cache="private, max-age=600")
             else:
                 self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
 
         def do_POST(self) -> None:  # noqa: N802
             caminho = self.path.split("?")[0]
-            if caminho != "/api/whatsapp/marcar":
+            if caminho not in ("/api/whatsapp/marcar", "/api/instagram/acao"):
                 self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
                 return
             # Cabeçalho próprio: um formulário de outro site não consegue enviá-lo sem CORS
@@ -163,9 +243,19 @@ def iniciar_painel(
             try:
                 tamanho = min(int(self.headers.get("Content-Length") or 0), 10_000)
                 dados = json.loads(self.rfile.read(tamanho) or b"{}")
-                id_produto, status = str(dados.get("id") or ""), dados.get("status")
-            except (ValueError, AttributeError):
-                id_produto, status = "", None
+                if not isinstance(dados, dict):
+                    raise ValueError
+            except ValueError:
+                dados = {}
+            if caminho == "/api/instagram/acao":
+                codigo, erro = acao_instagram(db, dados.get("id"), dados.get("acao"))
+                if codigo != 200:
+                    corpo = json.dumps({"erro": erro}, ensure_ascii=False).encode("utf-8")
+                    self._responder(codigo, "application/json; charset=utf-8", corpo)
+                else:
+                    self._json(lambda: montar_instagram(db))
+                return
+            id_produto, status = str(dados.get("id") or ""), dados.get("status")
             if not id_produto or status not in STATUS_WHATSAPP:
                 self._responder(400, "application/json; charset=utf-8", b'{"erro": "id ou status invalido"}')
                 return

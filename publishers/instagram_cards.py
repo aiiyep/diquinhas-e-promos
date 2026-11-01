@@ -106,7 +106,7 @@ def _foto_no_cartao(foto: Optional[Image.Image], tamanho: tuple[int, int], fundo
 
 def _quebrar(texto: str, fonte: ImageFont.FreeTypeFont, largura: int, max_linhas: int) -> list[str]:
     """Quebra o texto em até `max_linhas` linhas que cabem em `largura`, com reticências no fim."""
-    palavras, linhas, atual = texto.split(), [], ""
+    palavras, linhas, atual = _juntar_moeda(texto.split()), [], ""
     for i, palavra in enumerate(palavras):
         teste = f"{atual} {palavra}".strip()
         if fonte.getlength(teste) <= largura:
@@ -124,6 +124,17 @@ def _quebrar(texto: str, fonte: ImageFont.FreeTypeFont, largura: int, max_linhas
     if len(linhas) > max_linhas:
         linhas = linhas[: max_linhas - 1] + [_reticencias(" ".join(linhas[max_linhas - 1 :]), fonte, largura)]
     return linhas
+
+
+def _juntar_moeda(palavras: list[str]) -> list[str]:
+    """Mantém "R$" grudado no valor, para "R$ 30" não quebrar entre linhas."""
+    saida: list[str] = []
+    for palavra in palavras:
+        if saida and saida[-1].upper() == "R$":
+            saida[-1] += " " + palavra
+        else:
+            saida.append(palavra)
+    return saida
 
 
 def _reticencias(texto: str, fonte: ImageFont.FreeTypeFont, largura: int) -> str:
@@ -318,9 +329,11 @@ def capa(
     titulo: str,
     subtitulo: str = "",
     estilo: str = "grade",
+    dia: Optional[date] = None,
 ) -> Image.Image:
     base = _fundo(paleta).convert("RGBA")
-    _cabecalho(base, paleta, marca, date.today().strftime("%d/%m"))
+    # O servidor roda em UTC: quem chama passa o dia de São Paulo
+    _cabecalho(base, paleta, marca, (dia or date.today()).strftime("%d/%m"))
     draw = ImageDraw.Draw(base)
 
     if estilo == "destaque" and produtos:
@@ -453,19 +466,21 @@ def montar_carrossel(
     marca: Optional[str] = None,
     variante: int = 0,
     chamada: str = "Quer o link?",
+    estilo: Optional[str] = None,
+    dia: Optional[date] = None,
 ) -> list[Image.Image]:
     """
-    Capa + um card por produto + card final. `variante` (ex.: o número do dia) escolhe a
-    paleta e o estilo da capa, para os posts não saírem sempre iguais.
+    Capa + um card por produto + card final. `variante` (ex.: um contador de posts) escolhe a
+    paleta e, se `estilo` não for dado, também o estilo da capa, para os posts não saírem iguais.
     """
     if not produtos:
         raise ValueError("carrossel sem produtos")
     marca = marca or marca_padrao()
     paleta = PALETAS[variante % len(PALETAS)]
     # 5 paletas × 3 capas (primos entre si): 15 dias seguidos sem repetir a combinação
-    estilo = ESTILOS_CAPA[variante % len(ESTILOS_CAPA)]
+    estilo = estilo or ESTILOS_CAPA[variante % len(ESTILOS_CAPA)]
     total = len(produtos)
-    cards = [capa(produtos, paleta, marca, titulo, subtitulo, estilo)]
+    cards = [capa(produtos, paleta, marca, titulo, subtitulo, estilo, dia)]
     cards += [card_produto(p, paleta, marca, f"{i}/{total}") for i, p in enumerate(produtos, 1)]
     cards.append(card_final(paleta, marca, chamada))
     return cards

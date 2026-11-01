@@ -93,6 +93,16 @@
   .log.ERROR .n, .log.CRITICAL .n { color: var(--bad); }
   .log.INFO .n { color: var(--muted); }
   .wa-info { color: var(--muted); font-size: 13px; font-weight: 400; }
+  .ig-lista { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .ig-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ig-item.apagado { opacity: .5; }
+  .ig-topo { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .ig-titulo { font-weight: 600; }
+  .ig-cards { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; scroll-snap-type: x mandatory; }
+  .ig-cards a { flex: none; scroll-snap-align: start; }
+  .ig-cards img { width: 120px; height: 150px; object-fit: cover; border-radius: 6px; display: block; background: var(--bg); }
+  .ig-legenda { font: 12.5px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 8px; padding: 8px; margin: 0; max-height: 8em; overflow: auto; }
+  .ig-erro { color: var(--bad); font-size: 13px; }
   .wa-dica { color: var(--muted); font-size: 13px; margin: -4px 0 12px; }
   .wa-lista { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
   .wa-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -128,6 +138,12 @@
     <div class="card" id="card-falhas"><div class="rotulo">Falhas hoje</div><div class="valor" id="falhas-hoje">–</div></div>
     <div class="card"><div class="rotulo">No WhatsApp hoje</div><div class="valor" id="wa-hoje">–</div><div class="extra" id="wa-fila-total"></div></div>
   </div>
+
+  <section id="instagram">
+    <h2>Instagram <span class="wa-info" id="ig-info"></span></h2>
+    <p class="wa-dica" id="ig-dica"></p>
+    <div class="ig-lista" id="ig-lista"></div>
+  </section>
 
   <section id="whatsapp">
     <h2>Canal do WhatsApp <span class="wa-info" id="wa-info"></span></h2>
@@ -481,6 +497,118 @@
   }
   atualizarFila();
   setInterval(() => { if (!pausado) atualizarFila(); }, 60000);
+
+  // ------------------------------------------------------------ Instagram
+  const IG_STATUS = {
+    pendente: ["warn", "aguardando aprovação"], aprovado: ["ok", "aprovado"], publicado: ["ok", "publicado"],
+    descartado: ["", "descartado"], expirado: ["bad", "expirou"], falhou: ["bad", "falhou"],
+  };
+  let igAssinatura = "";
+  let igOcupado = false;
+
+  async function acaoInstagram(id, acao) {
+    const resp = await fetch("/api/instagram/acao", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Painel": "1" },
+      body: JSON.stringify({ id, acao }),
+    });
+    const dados = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(dados.erro || `HTTP ${resp.status}`);
+    renderInstagram(dados);
+  }
+
+  async function compartilharCards(post) {
+    const arquivos = await Promise.all(Array.from({ length: post.n_cards }, async (_, n) => {
+      const r = await fetch(`/api/instagram/card?id=${post.id}&n=${n}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return new File([await r.blob()], `carrossel-${post.id}-${String(n + 1).padStart(2, "0")}.jpg`, { type: "image/jpeg" });
+    }));
+    const dados = { files: arquivos };
+    if (!navigator.canShare(dados)) throw new Error("o navegador não compartilha várias imagens");
+    await navigator.share(dados);
+  }
+
+  function itemInstagram(post) {
+    const [classe, rotulo] = IG_STATUS[post.status] || ["", post.status];
+    const topo = el("div", { class: "ig-topo" },
+      el("span", { class: `tag ${classe}`, text: rotulo }),
+      el("span", { class: "tag", text: post.agendado }),
+      el("span", { class: "tag warn", text: post.formato }));
+    if (!post.usou_ia) topo.append(el("span", { class: "tag", text: "texto padrão" }));
+
+    const cards = el("div", { class: "ig-cards" });
+    for (let n = 0; n < post.n_cards; n++) {
+      const url = `/api/instagram/card?id=${post.id}&n=${n}`;
+      cards.append(el("a", { href: url, target: "_blank", rel: "noopener" },
+        el("img", { src: url, alt: `Card ${n + 1}`, loading: "lazy" })));
+    }
+    const item = el("div", { class: `ig-item${["descartado", "expirado"].includes(post.status) ? " apagado" : ""}` },
+      topo, el("div", { class: "ig-titulo", text: post.titulo || "" }), cards,
+      el("pre", { class: "ig-legenda", text: post.legenda || "" }));
+    if (post.erro) item.append(el("div", { class: "ig-erro", text: post.erro }));
+
+    const botoes = el("div", { class: "wa-botoes" });
+    const botao = (texto, acao, principal = false) => {
+      const b = el("button", { class: principal ? "principal" : "", text: texto });
+      b.addEventListener("click", async () => {
+        if (igOcupado) return;
+        if (acao === "descartar" && !confirm("Descartar este carrossel?")) return;
+        igOcupado = true;
+        b.textContent = acao === "regerar" ? "Gerando… (até 1 min)" : "…";
+        try { await acaoInstagram(post.id, acao); } catch (e) { b.textContent = `erro: ${e.message}`; }
+        finally { igOcupado = false; }
+      });
+      return b;
+    };
+    const ativo = ["pendente", "aprovado", "expirado", "falhou"].includes(post.status);
+    if (post.status === "pendente" || post.status === "expirado") botoes.append(botao("Aprovar", "aprovar", true));
+    if (post.status === "aprovado") botoes.append(botao("Desaprovar", "desaprovar"));
+    if (ativo) {
+      if (PODE_COMPARTILHAR) {
+        const share = el("button", { text: "Compartilhar imagens" });
+        share.addEventListener("click", async () => {
+          try { await compartilharCards(post); } catch (e) {
+            if (e.name !== "AbortError") piscar(share, `falhou: ${e.message}`, "Compartilhar imagens");
+          }
+        });
+        botoes.append(share);
+      }
+      const copiar = el("button", { text: "Copiar legenda" });
+      copiar.addEventListener("click", async () => {
+        try { await copiarTexto(post.legenda); piscar(copiar, "Copiada!", "Copiar legenda"); }
+        catch { piscar(copiar, "falhou", "Copiar legenda"); }
+      });
+      botoes.append(copiar, botao("Marquei como publicado", "publicado"), botao("Gerar outro", "regerar"),
+        botao("Descartar", "descartar"));
+    }
+    if (botoes.children.length) item.append(botoes);
+    return item;
+  }
+
+  function renderInstagram(dados) {
+    igAssinatura = dados.posts.map((p) => `${p.id}:${p.status}`).join(",");
+    const pendentes = dados.posts.filter((p) => p.status === "pendente").length;
+    $("ig-info").textContent = pendentes ? `${pendentes} aguardando aprovação` : "";
+    $("ig-dica").textContent = `O bot monta cada carrossel 1h antes de ${dados.horarios.join(", ")}. ` +
+      (dados.automatico ? "Publicação automática ligada: o que estiver pendente sai no horário."
+        : "Aprove até o horário; o que não for aprovado não sai. Enquanto a publicação automática não estiver " +
+          "ligada, use Compartilhar imagens → Instagram, cole a legenda e toque em \"Marquei como publicado\".");
+    $("ig-lista").replaceChildren(...(dados.posts.length ? dados.posts.map(itemInstagram) :
+      [el("div", { class: "vazio", text: "Nenhum carrossel ainda. O primeiro sai 1h antes do próximo horário." })]));
+  }
+
+  async function atualizarInstagram() {
+    if (igOcupado) return;
+    try {
+      const resp = await fetch("/api/instagram", { cache: "no-store" });
+      if (!resp.ok) return;
+      const dados = await resp.json();
+      if (dados.posts.map((p) => `${p.id}:${p.status}`).join(",") !== igAssinatura || !igAssinatura) renderInstagram(dados);
+    } catch { /* o aviso de conexão já aparece no topo */ }
+  }
+
+  atualizarInstagram();
+  setInterval(() => { if (!pausado) atualizarInstagram(); }, 60000);
 </script>
 </body>
 </html>

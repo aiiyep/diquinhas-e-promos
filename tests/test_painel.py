@@ -152,3 +152,59 @@ def test_baixar_foto_recusa_o_que_nao_e_imagem(monkeypatch):
     monkeypatch.setattr(servidor.requests, "get", lambda *a, **k: _Resp("text/html", b"<html>"))
     with pytest.raises(ValueError):
         servidor.baixar_foto("https://x/1.jpg")
+
+
+@pytest.fixture
+def painel_ig(tmp_path):
+    from datetime import datetime
+    from PIL import Image
+
+    db = HistoricoDB(tmp_path / "h.db")
+    pasta = tmp_path / "cards"
+    pasta.mkdir()
+    for n in range(3):
+        Image.new("RGB", (10, 10), "pink").save(pasta / f"{n:02d}.jpg")
+    pid = db.criar_post_instagram(
+        "top5", datetime(2026, 11, 2, 21, 0), "Top 3 de hoje", "legenda", [{"id": "SHOPEE1", "nome": "Batom", "preco": 9.9}],
+        str(pasta), 3, True,
+    )
+    sched = BackgroundScheduler(timezone="America/Sao_Paulo")
+    sched.start(paused=True)
+    servidor = iniciar_painel(sched, db, MemoriaLogHandler(), porta=0)
+    yield f"http://127.0.0.1:{servidor.server_address[1]}", db, pid
+    servidor.shutdown()
+    sched.shutdown(wait=False)
+
+
+def test_instagram_lista_card_e_acoes(painel_ig):
+    url, db, pid = painel_ig
+    with urllib.request.urlopen(f"{url}/api/instagram") as resp:
+        dados = json.loads(resp.read())
+    [post] = dados["posts"]
+    assert post["id"] == pid and post["status"] == "pendente" and post["formato"] == "Top do dia"
+    assert post["produtos"] == [{"nome": "Batom", "preco": 9.9, "desconto": None}]
+    assert dados["horarios"] == ["11:30", "17:30", "21:00"]
+
+    with urllib.request.urlopen(f"{url}/api/instagram/card?id={pid}&n=2") as resp:
+        assert resp.headers["Content-Type"] == "image/jpeg"
+    for consulta in (f"id={pid}&n=3", f"id={pid}&n=-1", "id=999&n=0", "id=x&n=0"):
+        with pytest.raises(urllib.error.HTTPError) as erro:
+            urllib.request.urlopen(f"{url}/api/instagram/card?{consulta}")
+        assert erro.value.code == 404
+
+    depois = _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "aprovar"})
+    assert depois["posts"][0]["status"] == "aprovado"
+
+    casos = [
+        ({"id": pid, "acao": "aprovar"}, True, 409),  # já aprovado
+        ({"id": pid, "acao": "apagar"}, True, 400),
+        ({"id": 999, "acao": "aprovar"}, True, 404),
+        ({"id": pid, "acao": "descartar"}, False, 403),
+    ]
+    for corpo, cabecalho, codigo in casos:
+        with pytest.raises(urllib.error.HTTPError) as erro:
+            _post(f"{url}/api/instagram/acao", corpo, cabecalho)
+        assert erro.value.code == codigo
+
+    _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "publicado"})
+    assert db.post_instagram(pid)["status"] == "publicado"

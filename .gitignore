@@ -22,3 +22,6 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+
+# Cards do carrossel do Instagram (gerados pelo bot)
+data/instagram/
