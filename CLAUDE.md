@@ -50,8 +50,8 @@ Fluxo: `main.py` → `orquestrador/agendador.py` → extrator → `PromoFormatte
 
 ## Produção
 
-- Roda 24/7 num droplet Ubuntu da DigitalOcean via systemd: `bot-promos.service` em `/root/diquinhas-e-promos`, com o venv em `.venv`.
-- Deploy: mesclar na `main`, depois no servidor `git pull origin main`, `.venv/bin/pip install -r requirements.txt` e `systemctl restart bot-promos`.
+- Roda 24/7 num droplet Ubuntu da DigitalOcean via systemd: `bot-promos.service` em `/root/diquinhas-e-promos`, com `ExecStart=/root/diquinhas-e-promos/venv/bin/python3 main.py`. **O venv do serviço é `venv/`, sem ponto.** Existe também um `.venv/` no servidor que o serviço não usa: instalar dependência nele não adianta (em 2026-11-01 o Pillow foi parar no `.venv/` e o bot caiu em loop de restart). Na dúvida, confira com `systemctl cat bot-promos | grep ExecStart`.
+- Deploy: mesclar na `main`, depois no servidor `git pull origin main`, `venv/bin/pip install -r requirements.txt` e `systemctl restart bot-promos`; confirme com `systemctl status bot-promos` (`active (running)`).
 - O SSH do droplet pede senha, então Claude não consegue executar comandos lá. Entregue ao usuário um comando pronto (um `ssh root@… "…"`) e peça a saída.
-- Deve existir **um único** processo `main.py`. Um segundo serviço (`diquinhas-bot.service`, com `venv/`) já causou postagens duplicadas e foi desativado. Se houver duplicação, peça primeiro `ps -eo pid,lstart,cmd | grep main.py` no servidor.
+- Deve existir **um único** processo `main.py`. Um segundo serviço (`diquinhas-bot.service`, que usa o mesmo `venv/`) já causou postagens duplicadas e foi desativado. Se houver duplicação, peça primeiro `ps -eo pid,lstart,cmd | grep main.py` no servidor.
 - O painel em produção escuta em `127.0.0.1:8080` (`PAINEL_HOST` no `.env` do servidor) e é publicado em HTTPS só na tailnet por `tailscale serve --bg 8080`: https://ubuntu-s-1vcpu-1gb-nyc1.tailc2772a.ts.net (precisa do Tailscale ligado no celular/PC).
