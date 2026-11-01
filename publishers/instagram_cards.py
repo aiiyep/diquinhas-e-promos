@@ -459,7 +459,7 @@ def card_final(paleta: Paleta, marca: str, chamada: str = "Quer o link?") -> Ima
     return base.convert("RGB")
 
 
-# ---------------------------------------------------------------- "Vale a pena?" e meme
+# ---------------------------------------------------------------- "Vale a pena?" e dica
 
 # A Poppins não tem emoji nem a maioria dos símbolos: o que não for texto latino sai do card
 _PERMITIDOS_EXTRA = set("…–—“”‘’•·ºª°")
@@ -534,11 +534,13 @@ def card_topicos(
     itens = [limpar_para_card(i) for i in itens if limpar_para_card(i)]
     disponivel = ALTURA - 170 - y
     largura_txt = LARGURA - 2 * _MARGEM - 100
-    for tam in (54, 50, 46, 42, 38, 35, 32):
+    # Maior letra em que tudo cabe sem cortar o texto com reticências
+    for tam in (54, 50, 46, 42, 38, 35, 32, 29):
         fonte = _fonte("SemiBold", tam)
-        blocos = [_quebrar(i, fonte, largura_txt, 4) for i in itens]
+        blocos = [_quebrar(i, fonte, largura_txt, 9) for i in itens]
+        cortado = any(b and b[-1].endswith("…") and not i.endswith("…") for b, i in zip(blocos, itens))
         altura = sum(len(b) * _altura(fonte) * 1.02 for b in blocos) + 34 * (len(blocos) - 1)
-        if altura <= disponivel:
+        if altura <= disponivel and not cortado:
             break
     y += max(0, (disponivel - altura) / 2.4)
     for bloco in blocos:
@@ -619,43 +621,69 @@ def montar_vale_a_pena(
     return cards
 
 
-def card_meme(texto: str, paleta: Paleta, marca: Optional[str] = None) -> Image.Image:
-    """Meme no formato de print de tweet, com a cara da página (sem curtidas nem números inventados)."""
-    marca = marca or marca_padrao()
+def capa_texto(
+    paleta: Paleta,
+    marca: str,
+    titulo: str,
+    subtitulo: str = "",
+    rotulo: str = "Salva pra depois",
+    dia: Optional[date] = None,
+) -> Image.Image:
+    """Capa só com texto (carrossel de dica): rótulo, título grande no centro e "Arrasta pro lado"."""
     base = _fundo(paleta).convert("RGBA")
-    largura = LARGURA - 2 * _MARGEM
-    pad = 56
-    paragrafos = limpar_para_card(texto).splitlines()
-    for tam in (60, 54, 48, 44, 40, 36):
-        fonte = _fonte("Medium", tam)
-        linhas: list[str] = []
-        for paragrafo in paragrafos:
-            linhas.extend(_quebrar(paragrafo, fonte, largura - 2 * pad, 6) if paragrafo else [""])
-        altura_txt = sum(_altura(fonte) * (1.05 if linha else 0.55) for linha in linhas)
-        if altura_txt <= 760:
-            break
-    altura_cartao = int(pad + 110 + 40 + altura_txt + pad)
-    y0 = (ALTURA - altura_cartao) // 2
-    caixa = (_MARGEM, y0, LARGURA - _MARGEM, y0 + altura_cartao)
-    _sombra(base, caixa, 44, 55)
+    _cabecalho(base, paleta, marca, (dia or date.today()).strftime("%d/%m"))
     draw = ImageDraw.Draw(base)
-    draw.rounded_rectangle(caixa, 44, fill="#FFFFFF")
-    ax, ay = _MARGEM + pad, y0 + pad
-    draw.ellipse((ax, ay, ax + 110, ay + 110), fill=paleta.destaque)
-    inicial = (marca.lstrip("@")[:1] or "D").upper()
-    fonte_ini = _fonte("Black", 60)
-    draw.text((ax + 55 - fonte_ini.getlength(inicial) / 2, ay + 14), inicial, font=fonte_ini, fill=paleta.selo_texto)
-    draw.text((ax + 140, ay + 12), "diquinhas & promos", font=_fonte("Bold", 40), fill="#14171A")
-    arroba = marca if marca.startswith("@") else "@" + marca.replace(" ", "").lower()
-    draw.text((ax + 140, ay + 62), arroba, font=_fonte("Regular", 32), fill="#657786")
-    y = ay + 110 + 40
+    largura = LARGURA - 2 * _MARGEM
+    for tam in (124, 112, 100, 90, 80):
+        fonte = _fonte("Black", tam)
+        linhas = _quebrar(limpar_para_card(titulo).upper(), fonte, largura, 5)
+        altura_titulo = len(linhas) * _altura(fonte) * 0.84
+        if altura_titulo <= 620:
+            break
+    fonte_sub = _fonte("Medium", 42)
+    linhas_sub = _quebrar(limpar_para_card(subtitulo), fonte_sub, largura, 2) if subtitulo else []
+    total = 56 + 50 + altura_titulo + (30 + len(linhas_sub) * _altura(fonte_sub) if linhas_sub else 0)
+    y = int((ALTURA - total) / 2) - 20
+
+    fonte_rot = _fonte("Bold", 32)
+    largura_rot = fonte_rot.getlength(rotulo.upper()) + 56
+    x_rot = (LARGURA - largura_rot) / 2
+    draw.rounded_rectangle((x_rot, y, x_rot + largura_rot, y + 60), 30, fill=paleta.destaque)
+    draw.text((x_rot + 28, y + 10), rotulo.upper(), font=fonte_rot, fill=paleta.selo_texto)
+    y += 60 + 50
     for linha in linhas:
-        if linha:
-            draw.text((_MARGEM + pad, y), linha, font=fonte, fill="#14171A")
-            y += _altura(fonte) * 1.05
-        else:
-            y += _altura(fonte) * 0.55
+        y = _texto_centro(draw, int(y), linha, fonte, paleta.texto) - int(_altura(fonte) * 0.16)
+    if linhas_sub:
+        y += 30
+        for linha in linhas_sub:
+            y = _texto_centro(draw, int(y), linha, fonte_sub, paleta.suave)
+    _arraste(base, paleta)
     return base.convert("RGB")
+
+
+def montar_dica(
+    titulo: str,
+    subtitulo: str,
+    itens: Sequence[tuple[str, str, str, str]],
+    produtos: Sequence[ProdutoCard] = (),
+    marca: Optional[str] = None,
+    variante: int = 0,
+    dia: Optional[date] = None,
+) -> list[Image.Image]:
+    """
+    Carrossel de dica: capa de texto + um card por item (rótulo, título, texto, ícone) + até 2
+    achadinhos que combinam com a dica + card final.
+    """
+    marca = marca or marca_padrao()
+    paleta = PALETAS[variante % len(PALETAS)]
+    cards = [capa_texto(paleta, marca, titulo, subtitulo, dia=dia)]
+    total = len(itens)
+    for n, (rotulo, titulo_item, texto, icone) in enumerate(itens, 1):
+        cards.append(card_topicos(paleta, marca, rotulo, titulo_item, [texto], icone, None, f"{n}/{total}"))
+    for p in produtos:
+        cards.append(card_produto(p, paleta, marca, "achadinho"))
+    cards.append(card_final(paleta, marca))
+    return cards
 
 
 def montar_carrossel(

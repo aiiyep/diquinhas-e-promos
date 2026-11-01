@@ -65,12 +65,13 @@ FORMATOS: dict[str, Formato] = {
         "Top {n} achadinhos de hoje", "Até {max}% OFF",
         "Os maiores descontos de hoje, separados a dedo pra você.",
     ),
-    # Os dois abaixo têm geradores próprios (gerar_vale_a_pena, gerar_meme); os textos aqui são só
-    # o nome no painel e o padrão da capa
+    # Os abaixo têm geradores próprios (gerar_vale_a_pena, gerar_dica); os textos aqui são só o nome
+    # no painel e o padrão da capa. "meme" ficou só para exibir posts antigos.
     "valeapena": Formato(
         "valeapena", "Vale a pena?", "análise de um produto", "Vale a pena?", "", "",
     ),
     "meme": Formato("meme", "Meme", "meme do nicho", "", "", ""),
+    "dica": Formato("dica", "Dica", "carrossel educativo", "", "", ""),
 }
 
 # Aviso de publicidade (CONAR) em todo post com produto e link de afiliado
@@ -478,52 +479,81 @@ def _legenda_vale(
     return "\n\n".join(p for p in partes if p)[:LIMITE_LEGENDA]
 
 
-# ---------------------------------------------------------------- meme
+# ---------------------------------------------------------------- dica (conteúdo para salvar)
 
+# Assuntos e estilos giram por dia; o produto no fim é opcional (só se o histórico tiver algo que combine)
+AREAS_DICA = ("skincare", "maquiagem", "cabelo", "unhas", "corpo e banho", "perfume")
+
+
+@dataclass(frozen=True)
+class EstiloDica:
+    chave: str
+    rotulo: str  # rótulo de cada card ("Erro 1", "Passo 2"…); vazio no mito ou verdade
+    icone: str
+    pauta: str
+
+
+ESTILOS_DICA: tuple[EstiloDica, ...] = (
+    EstiloDica("erros", "Erro", "alerta", "3 ou 4 erros comuns de {area} e como evitar cada um"),
+    EstiloDica("passo", "Passo", "seta", "um passo a passo de {area}, de 3 a 5 passos, na ordem certa"),
+    EstiloDica("mito", "", "check", "3 ou 4 crenças populares sobre {area}, cada uma marcada como MITO ou VERDADE"),
+    EstiloDica("dicas", "Dica", "check", "3 a 5 dicas práticas e pouco óbvias de {area}"),
+)
+
+# Saúde: a página não dá conselho médico
+_MEDICO = re.compile(
+    r"\b(remedio|medicamento|antibiotico|corticoide|isotretinoina|roacutan|receita medica|diagnostic|"
+    r"tratar acne grave|doenca|dermatite|psoriase)"
+)
 _PESADO = re.compile(
-    r"\b(gorda|gordinha|gorducha|feia|feiosa|burra|puta|porra|caralho|merda|bosta|vadia|piranha|"
-    r"bolsonaro|lula|deus|igreja|macumba)\b"
+    r"\b(gorda|gordinha|gorducha|feia|feiosa|burra|puta|porra|caralho|merda|bosta|vadia|piranha)\b"
 )
-HASHTAGS_MEME = ["#memes", "#humor", "#achadinhos", "#beleza", "#skincare", "#maquiagem", "#comprinhas", "#shopee"]
-
-# Usados quando o Gemini está fora do ar ou nada do que ele sugeriu passou
-MEMES_PADRAO = (
-    "eu: esse mês não compro mais nada de skincare\n\neu 3 minutos depois: “só vou dar uma olhadinha no carrinho”",
-    "ninguém:\n\neu às 2 da manhã comparando 14 corretivos iguais",
-    "minha conta bancária vendo eu abrir a Shopee pela quinta vez no dia",
-    "“é só um batom” — eu, pela décima vez esse mês",
-    "eu não sou viciada em skincare\n\neu só tenho 9 séruns abertos ao mesmo tempo",
-    "a encomenda chegando e eu agindo como se fosse surpresa",
-    "eu: vou usar até acabar\n\nmeu banheiro: 6 shampoos pela metade",
-    "quando a amiga pergunta “onde você comprou?” e você já manda o link antes dela terminar a frase",
-    "eu salvando 47 posts de maquiagem pra nunca mais olhar",
-    "rotina de skincare: 10 passos\n\nminha paciência às 23h: 1 passo",
-    "POV: você entrou pra comprar um demaquilante e saiu com 7 itens no carrinho",
-    "eu fingindo que preciso de mais uma paleta de sombras",
-)
+_NUMERACAO = re.compile(r"^\s*(?:(?:passo|dica|erro)\s*\d+\s*[.)\-:º°]*|\d+\s*[.)\-:º°]+)\s*", re.IGNORECASE)
+AVISO_SAUDE = "Dica geral: se você tem pele sensível, alergia ou alguma condição de pele, fale com um dermatologista."
 
 
 @dataclass
-class TextosMeme:
+class ItemDica:
+    titulo: str
     texto: str
-    legenda: str
-    usou_ia: bool
+    rotulo: str
+    icone: str
 
 
-_SCHEMA_MEME = {
+@dataclass
+class TextosDica:
+    area: str
+    estilo: str
+    titulo_capa: str
+    subtitulo: str
+    itens: list[ItemDica]
+    busca: list[str]
+    abertura: str
+    hashtags: list[str]
+
+
+_SCHEMA_DICA = {
     "type": "OBJECT",
     "properties": {
-        "memes": {
+        "titulo_capa": {"type": "STRING"},
+        "subtitulo": {"type": "STRING"},
+        "itens": {
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
-                "properties": {"texto": {"type": "STRING"}, "legenda": {"type": "STRING"}},
-                "required": ["texto", "legenda"],
+                "properties": {
+                    "titulo": {"type": "STRING"},
+                    "texto": {"type": "STRING"},
+                    "mito_ou_verdade": {"type": "STRING"},
+                },
+                "required": ["titulo", "texto"],
             },
         },
+        "busca": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "abertura": {"type": "STRING"},
         "hashtags": {"type": "ARRAY", "items": {"type": "STRING"}},
     },
-    "required": ["memes", "hashtags"],
+    "required": ["titulo_capa", "subtitulo", "itens", "busca", "abertura", "hashtags"],
 }
 
 
@@ -533,66 +563,122 @@ def _parecido(a: str, b: str) -> bool:
     return bool(pa and pb) and comuns >= 3 and comuns >= 0.6 * min(len(pa), len(pb))
 
 
-def _meme_ok(texto: str, recentes: Sequence[str]) -> bool:
-    texto = texto.strip()
-    # terminar em "minha conta bancária:" pede uma imagem que o card não tem
-    if not texto or len(texto) > 220 or texto.count("\n") > 6 or texto.endswith(":"):
+def _dica_ok(texto: Any, max_chars: int) -> bool:
+    """Dica pode ter número (FPS 30, 2 dedos de protetor); o que não pode é promessa, relato ou saúde."""
+    texto = str(texto or "").strip()
+    if not texto or len(texto) > max_chars:
         return False
     normal = _normalizar(texto)
-    if _PESADO.search(normal) or _PROIBIDOS.search(normal) or "r$" in normal or _sem_acento(texto):
-        return False
-    return not any(_parecido(texto, r) for r in recentes)
+    barrado = (_PROIBIDOS, _EXPERIENCIA, _PROMESSAS, _MEDICO, _PESADO)
+    return not any(r.search(normal) for r in barrado) and "r$" not in normal and not _sem_acento(texto)
 
 
-def _prompt_meme(recentes: Sequence[str]) -> str:
-    evitar = "\n".join(f"- {r.replace(chr(10), ' / ')}" for r in list(recentes)[:15]) or "- (nenhum ainda)"
-    return f"""Você cria memes para o Instagram {marca_padrao()}, página brasileira de achadinhos de beleza
-para mulheres. O meme vai num card com cara de print de tweet, só texto, sem imagem.
+def _prompt_dica(area: str, estilo: EstiloDica, recentes: Sequence[str]) -> str:
+    evitar = "\n".join(f"- {r}" for r in list(recentes)[:20]) or "- (nenhum ainda)"
+    mito = (
+        '\n- Em cada item, "mito_ou_verdade": "MITO" ou "VERDADE"; o título é a crença (ex.: "Pele oleosa não '
+        'precisa de hidratante") e o texto explica.' if estilo.chave == "mito" else ""
+    )
+    return f"""Você escreve para o Instagram {marca_padrao()}, página brasileira de achadinhos de beleza para
+mulheres. Este post é um carrossel educativo para SALVAR e mandar pra amiga, sobre {area}:
+{estilo.pauta.format(area=area)}.
 
-Crie 3 memes curtos e diferentes entre si sobre a vida de quem ama beleza, skincare, maquiagem,
-cabelo e compras online (carrinho cheio, encomenda chegando, "só vou olhar", amiga pedindo o link,
-rotina de skincare, gaveta de maquiagem…). Formatos que funcionam: "eu: … / eu 3 minutos depois: …",
-"ninguém: / eu: …", "POV: …", frase única de identificação. A ideia é a pessoa marcar a amiga.
+Tom de amiga que entende do assunto, informal, direto ao ponto. Português correto, COM acentos.
+Só conhecimento consolidado e seguro de beleza; nada de conselho médico, remédio ou doença de pele;
+sem promessa de resultado ("garante", "100%", "cura"); sem relato pessoal ("eu uso", "testei");
+sem citar marca, loja ou preço.
 
-Regras: português do Brasil, informal, COM acentos (não, você, mês, já, só, até); até 200 caracteres; use \\n para quebrar linha;
-sem emoji no texto do meme; a graça tem que estar TODA no texto (o card não tem imagem, então
-nunca termine com dois-pontos esperando uma foto); sem palavrão; sem zoar corpo, peso ou aparência de ninguém; sem política
-ou religião; sem citar marca, loja ou preço.
-
-Não repita nem parafraseie estes, que já foram usados:
+Não repita estes temas, já usados:
 {evitar}
 
-Para cada meme, "legenda": 1 frase curta para a legenda do post (até 120 caracteres, pode ter emoji).
-Também 6 a 8 hashtags em português, sem acento."""
+Responda em JSON:
+- titulo_capa: gancho forte, até 34 caracteres (ex.: "3 erros que estragam sua base").
+- subtitulo: até 55 caracteres.
+- itens: de 3 a 5, cada um com "titulo" (até 48 caracteres) e "texto" (até 170 caracteres).{mito}
+- busca: 2 a 4 tipos de produto que ajudam nesse assunto, em 1 ou 2 palavras (ex.: "protetor solar",
+  "esponja", "sérum"), para procurar achadinhos.
+- abertura: 1 ou 2 frases para a legenda, até 200 caracteres, com 1 ou 2 emojis.
+- hashtags: 6 a 8, em português, sem acento."""
 
 
-def gerar_meme(recentes: Sequence[str]) -> TextosMeme:
-    """Meme do dia: o primeiro do Gemini que passar nas conferências; senão, um da lista padrão."""
-    texto, frase, tags, usou_ia = "", "", list(HASHTAGS_MEME), False
-    if gemini_configurado():
+def tema_do_dia(dia_ordinal: int) -> tuple[str, EstiloDica]:
+    """Assunto e estilo do dia: o assunto muda todo dia e o estilo a cada 3 dias."""
+    return AREAS_DICA[dia_ordinal % len(AREAS_DICA)], ESTILOS_DICA[(dia_ordinal // 3) % len(ESTILOS_DICA)]
+
+
+def gerar_dica(area: str, estilo: EstiloDica, recentes: Sequence[str], tentativas: int = 2) -> Optional[TextosDica]:
+    """Textos do carrossel de dica, conferidos. None sem Gemini ou se nada passar (o horário usa outro formato)."""
+    if not gemini_configurado():
+        return None
+    for _ in range(tentativas):
         try:
-            ia = gerar_json(_prompt_meme(recentes), _SCHEMA_MEME, temperatura=1.0)
-            for meme in ia.get("memes") or []:
-                candidato = str((meme or {}).get("texto") or "").replace("\\n", "\n").strip()
-                if _meme_ok(candidato, recentes):
-                    texto, usou_ia = candidato, True
-                    legenda = str(meme.get("legenda") or "").strip()
-                    if legenda and len(legenda) <= 140 and not _PESADO.search(_normalizar(legenda)) \
-                            and not _PROIBIDOS.search(_normalizar(legenda)):
-                        frase = legenda
-                    tags = _hashtags(ia.get("hashtags"))[:8] or tags
-                    break
-            if not texto:
-                logger.info("Nenhum meme do Gemini passou nas conferências; usando um da lista padrão.")
+            ia = gerar_json(_prompt_dica(area, estilo, recentes), _SCHEMA_DICA, temperatura=0.8)
         except GeminiIndisponivel as exc:
-            logger.warning("Meme sem Gemini (%s); usando um da lista padrão.", exc)
-    if not texto:
-        livres = [m for m in MEMES_PADRAO if not any(_parecido(m, r) or m == r for r in recentes)]
-        texto = (livres or list(MEMES_PADRAO))[0]
+            logger.warning("Dica sem Gemini (%s).", exc)
+            return None
+        titulo = _virgula_decimal(str(ia.get("titulo_capa") or "").strip())
+        subtitulo = _virgula_decimal(str(ia.get("subtitulo") or "").strip())
+        if not _dica_ok(titulo, 40) or any(_parecido(titulo, r) for r in recentes):
+            logger.info("Título da dica recusado ou repetido; pedindo de novo.")
+            continue
+        itens: list[ItemDica] = []
+        for n, item in enumerate(ia.get("itens") or [], 1):
+            t, x = (_virgula_decimal(str((item or {}).get(k) or "").strip()) for k in ("titulo", "texto"))
+            t = _NUMERACAO.sub("", t)  # o card já diz "Passo 1"; "1. Hidratação" repetiria
+            if not (_dica_ok(t, 55) and _dica_ok(x, 190)):
+                continue
+            if estilo.chave == "mito":
+                veredito = str(item.get("mito_ou_verdade") or "").strip().upper()
+                if veredito not in ("MITO", "VERDADE"):
+                    continue
+                itens.append(ItemDica(t, x, veredito.capitalize(), "alerta" if veredito == "MITO" else "check"))
+            else:
+                itens.append(ItemDica(t, x, f"{estilo.rotulo} {len(itens) + 1}", estilo.icone))
+        if len(itens) < 3:
+            logger.info("Só %d itens da dica passaram nas conferências; pedindo de novo.", len(itens))
+            continue
+        busca = [
+            " ".join(str(b).split()).lower() for b in (ia.get("busca") or [])
+            if 3 <= len(str(b).strip()) <= 30
+        ][:4]
+        abertura = str(ia.get("abertura") or "").strip()
+        if not _dica_ok(abertura, 240):
+            abertura = "Salva esse pra não esquecer! 📌"
+        return TextosDica(
+            area=area, estilo=estilo.chave, titulo_capa=titulo,
+            subtitulo=subtitulo if _dica_ok(subtitulo, 60) else "Salva pra não esquecer",
+            itens=itens[:5], busca=busca, abertura=abertura, hashtags=_hashtags(ia.get("hashtags")),
+        )
+    return None
+
+
+def legenda_dica(
+    textos: TextosDica,
+    produtos: Sequence[dict[str, Any]],
+    nomes: Sequence[str],
+    conferido_em: datetime,
+) -> str:
     partes = [
-        frase or "Quem nunca? 😂",
-        "Marca aquela amiga que é assim 👇",
-        "E as ofertas de verdade ficam no nosso canal do WhatsApp: link na bio!",
-        " ".join(tags),
+        textos.abertura,
+        "\n".join(f"{'✅' if i.icone != 'alerta' else '⚠️'} {i.titulo}" for i in textos.itens),
+        "📌 Salva pra não esquecer e manda pra amiga que precisa!",
     ]
-    return TextosMeme(texto=texto, legenda="\n\n".join(partes), usou_ia=usou_ia)
+    if produtos:
+        itens = []
+        for p, nome in zip(produtos, nomes):
+            linha = f"• {nome}: R$ {_format_brl(p['preco'])}"
+            if p.get("desconto") and p.get("preco_original"):
+                linha += f" (era R$ {_format_brl(p['preco_original'])}, {p['desconto']}% OFF)"
+            itens.append(linha)
+        partes += [
+            "🛍️ Achadinhos que ajudam nisso:\n" + "\n".join(itens),
+            "👉 Os links estão no nosso canal do WhatsApp: toca no link da bio!",
+            f"Preços conferidos em {conferido_em:%d/%m} às {conferido_em:%H:%M} e podem mudar a qualquer momento.",
+            AVISO_PUBLI,
+        ]
+    else:
+        partes.append("👉 Achadinhos de beleza com desconto todo dia no nosso canal do WhatsApp: link na bio!")
+    if textos.area in ("skincare", "corpo e banho"):
+        partes.append(AVISO_SAUDE)
+    partes.append(" ".join(textos.hashtags))
+    return "\n\n".join(p for p in partes if p)[:LIMITE_LEGENDA]

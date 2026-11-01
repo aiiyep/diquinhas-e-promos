@@ -3,7 +3,9 @@ Posts do Instagram: 3 por dia, cada horário com um formato.
 
     11h30  Vale a pena?   análise de 1 produto (o que é, pontos fortes, fica de olho, pra quem é,
                           veredito). Se nenhum produto render uma análise, cai para o "Achado do dia".
-    17h30  Meme           card de print de tweet, sem produto nem preço (para atrair gente nova)
+    17h30  Dica           carrossel educativo para salvar (erros, passo a passo, mito ou verdade,
+                          dicas), com até 2 achadinhos do histórico que combinem. Sem Gemini, vira
+                          "Abaixo de R$ 30/50".
     21h00  Top do dia     carrossel com os maiores descontos, capa "grade", 3 a 5 produtos
 
 Uma hora antes de cada horário o bot prepara o post (`preparar_post`): pega o que já foi postado
@@ -21,6 +23,7 @@ import logging
 from pathlib import Path
 import re
 import shutil
+import unicodedata
 from typing import Any, Iterable, Optional
 import uuid
 from zoneinfo import ZoneInfo
@@ -36,12 +39,20 @@ from extractors.shopee import ShopeeExtractor
 from publishers.instagram_cards import (
     PALETAS,
     ProdutoCard,
-    card_meme,
     montar_carrossel,
+    montar_dica,
     montar_vale_a_pena,
     salvar_jpeg,
 )
-from publishers.instagram_legenda import FORMATOS, gerar_meme, gerar_textos, gerar_vale_a_pena
+from publishers.instagram_legenda import (
+    FORMATOS,
+    gerar_dica,
+    gerar_textos,
+    gerar_vale_a_pena,
+    legenda_dica,
+    nome_padrao,
+    tema_do_dia,
+)
 
 logger = logging.getLogger("diquinhas_e_promos.instagram")
 
@@ -63,7 +74,7 @@ class Slot:
 
 SLOTS: tuple[Slot, ...] = (
     Slot("valeapena", "11:30"),
-    Slot("meme", "17:30"),
+    Slot("dica", "17:30"),
     Slot("top5", "21:00"),
 )
 
@@ -180,6 +191,10 @@ def ordenar_vale_a_pena(candidatos: list[dict[str, Any]]) -> list[dict[str, Any]
         return (prova, ficha, (p["desconto"] or 0) >= 15, p.get("avaliacao") or 0, p["desconto"] or 0, p.get("vendas") or 0)
 
     return _sem_titulos_repetidos(sorted(_validos(candidatos), key=chave, reverse=True))
+
+
+def _normalizar(texto: str) -> str:
+    return unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii").lower()
 
 
 def _palavras(titulo: str) -> set[str]:
@@ -341,8 +356,12 @@ def preparar_post(
 ) -> Optional[int]:
     """Monta o post do horário e o grava como pendente. Devolve o id, ou None se não deu."""
     agora = (agora or datetime.now(_TZ)).astimezone(_TZ)
-    if slot_chave == "meme":
-        return _preparar_meme(db, agendado_para)
+    if slot_chave == "dica":
+        post_id = _preparar_dica(db, agendado_para, excluir, agora)
+        if post_id:
+            return post_id
+        logger.info("Sem texto de dica; o horário vira 'Abaixo de R$ X'.")
+        return _preparar_lista(db, slot_chave, "barato", agendado_para, excluir, agora)
     if slot_chave == "valeapena":
         post_id = _preparar_vale_a_pena(db, agendado_para, excluir, agora)
         if post_id:
@@ -409,17 +428,46 @@ def _preparar_vale_a_pena(
     return None
 
 
-def _preparar_meme(db: HistoricoDB, agendado_para: datetime) -> int:
-    textos = gerar_meme(db.memes_instagram_recentes())
-    imagem = card_meme(textos.texto, PALETAS[_variante("meme", agendado_para) % len(PALETAS)])
+def produtos_da_dica(candidatos: list[dict[str, Any]], busca: list[str], maximo: int = 2) -> list[dict[str, Any]]:
+    """Achadinhos do histórico cujo título contém um dos tipos de produto sugeridos para a dica."""
+    termos = [_normalizar(t) for t in busca if len(t.strip()) >= 3]
+    combinam = [c for c in candidatos if any(t in _normalizar(c.get("titulo") or "") for t in termos)]
+    if not combinam:
+        return []
+    atualizados = _validos(atualizar_precos(_pre_selecionar("achado", combinam)[:8]))
+    atualizados.sort(key=lambda p: (p["desconto"] or 0, p.get("avaliacao") or 0), reverse=True)
+    return _sem_titulos_repetidos(atualizados)[:maximo]
+
+
+def _preparar_dica(
+    db: HistoricoDB, agendado_para: datetime, excluir: Iterable[str], agora: datetime
+) -> Optional[int]:
+    area, estilo = tema_do_dia(agendado_para.toordinal())
+    textos = gerar_dica(area, estilo, db.titulos_instagram_recentes("dica"))
+    if textos is None:
+        return None
+    cards_produtos: list[ProdutoCard] = []
+    escolhidos: list[dict[str, Any]] = []
+    for p in produtos_da_dica(_candidatos(db, excluir), textos.busca):
+        card = _card_com_foto(p)
+        if card:
+            card.titulo = nome_padrao(p["titulo"])
+            cards_produtos.append(card)
+            escolhidos.append(p)
+    nomes = [c.titulo for c in cards_produtos]
+    imagens = montar_dica(
+        textos.titulo_capa, textos.subtitulo, [(i.rotulo, i.titulo, i.texto, i.icone) for i in textos.itens],
+        cards_produtos, variante=_variante("dica", agendado_para), dia=agendado_para.date(),
+    )
     return _salvar(
-        db, "meme", "meme", agendado_para, textos.texto, textos.legenda, [], [imagem], textos.usou_ia,
-        "Meme" + ("" if textos.usou_ia else " (lista padrão)"),
+        db, "dica", "dica", agendado_para, textos.titulo_capa, legenda_dica(textos, escolhidos, nomes, agora),
+        [_resumo_produto(p, n) for p, n in zip(escolhidos, nomes)], imagens, True,
+        f"Dica '{textos.titulo_capa}' ({area}, {len(escolhidos)} achadinhos)",
     )
 
 
 def regerar_post(db: HistoricoDB, post_id: int) -> Optional[int]:
-    """'Gerar outro': monta um post novo para o mesmo horário, sem os produtos (ou o meme) do anterior."""
+    """'Gerar outro': monta um post novo para o mesmo horário, sem os produtos do anterior."""
     antigo = db.post_instagram(post_id)
     if not antigo or antigo["status"] not in ("pendente", "aprovado", "descartado", "expirado", "falhou"):
         return None
