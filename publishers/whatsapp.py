@@ -15,6 +15,20 @@ from publishers.telegram_publisher import _format_brl, _to_float
 # Caracteres que o WhatsApp interpreta como formatação e quebrariam o título
 _MARCADORES = re.compile(r"[*_~`]+")
 
+# Produto de catálogo do ML: o nome no meio do endereço é enfeite (o ML abre só com /p/MLB…)
+_ML_CATALOGO = re.compile(r"^https?://(?:www\.)?mercadolivre\.com\.br/(?:[^?#]*/)?p/(MLB\d+)(\?[^#]*)?", re.IGNORECASE)
+
+
+def encurtar_link(link: str) -> str:
+    """
+    Tira o nome do produto do link de catálogo do ML (186 → ~90 caracteres). Os parâmetros do fim
+    (matt_word/matt_tool, que dão a comissão) ficam intactos. Outros links ficam como estão.
+    """
+    m = _ML_CATALOGO.match(link.strip())
+    if not m:
+        return link.strip()
+    return f"https://www.mercadolivre.com.br/p/{m.group(1).upper()}{m.group(2) or ''}"
+
 
 def _limpar(texto: str) -> str:
     return " ".join(_MARCADORES.sub(" ", texto).split())
@@ -27,7 +41,7 @@ def montar_texto_whatsapp(post: dict[str, Any]) -> str:
     """
     emojis = _limpar(str(post.get("emojis") or "🔥"))
     titulo = _limpar(str(post.get("titulo") or "Oferta"))
-    link = str(post.get("link") or post.get("link_produto") or "").strip()
+    link = encurtar_link(str(post.get("link") or post.get("link_produto") or ""))
 
     promo = _to_float(post.get("preco") if post.get("preco") is not None else post.get("preco_promocional"))
     orig = _to_float(post.get("preco_original"))
