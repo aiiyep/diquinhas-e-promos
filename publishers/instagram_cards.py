@@ -5,7 +5,7 @@ Os layouts são fixos no código e variam por paleta e por estilo de capa, entã
 as artes sozinho, sem IA e sem Canva. Foto, preço e desconto são sempre os reais do produto:
 nada é inventado (sem "De" informado, o card mostra só o preço).
 
-Carrossel = capa + um card por produto + card final (chamada para o grupo, "link na bio").
+Carrossel = capa + um card por produto + card final (chamada para o canal do WhatsApp, "link na bio").
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any, Optional, Sequence
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+from config import env
 from publishers.telegram_publisher import _format_brl, _to_float
 
 LARGURA, ALTURA = 1080, 1350
@@ -47,6 +48,12 @@ PALETAS: tuple[Paleta, ...] = (
 )
 
 ESTILOS_CAPA = ("grade", "destaque", "lista")
+
+
+def marca_padrao() -> str:
+    """@ da página (INSTAGRAM_ARROBA no .env), ou o nome do projeto se não estiver definido."""
+    arroba = (env("INSTAGRAM_ARROBA") or "").strip().lstrip("@")
+    return f"@{arroba}" if arroba else "Diquinhas e Promos"
 
 
 # ---------------------------------------------------------------- utilitários de desenho
@@ -170,12 +177,13 @@ def _cabecalho(base: Image.Image, paleta: Paleta, marca: str, direita: str = "")
     draw = ImageDraw.Draw(base)
     fonte = _fonte("SemiBold", 30)
     draw.ellipse((_MARGEM, 62, _MARGEM + 18, 80), fill=paleta.destaque)
-    draw.text((_MARGEM + 32, 52), marca.upper(), font=fonte, fill=paleta.texto)
+    # @ do Instagram fica como está (minúsculo); nome solto vai em caixa alta
+    draw.text((_MARGEM + 32, 52), marca if marca.startswith("@") else marca.upper(), font=fonte, fill=paleta.texto)
     if direita:
         draw.text((LARGURA - _MARGEM - fonte.getlength(direita), 52), direita, font=fonte, fill=paleta.suave)
 
 
-def _rodape_link(base: Image.Image, paleta: Paleta, texto: str = "Link no grupo  •  link na bio") -> None:
+def _rodape_link(base: Image.Image, paleta: Paleta, texto: str = "Link no canal  •  link na bio") -> None:
     draw = ImageDraw.Draw(base)
     fonte = _fonte("SemiBold", 32)
     largura = fonte.getlength(texto) + 80
@@ -422,7 +430,7 @@ def card_final(paleta: Paleta, marca: str, chamada: str = "Quer o link?") -> Ima
     y += 70
     passos = (
         ("1", "Toque no link da bio"),
-        ("2", "Entre no grupo de ofertas"),
+        ("2", "Siga o canal no WhatsApp"),
         ("3", "Promoções novas todo dia"),
     )
     fonte_num = _fonte("ExtraBold", 46)
@@ -442,7 +450,7 @@ def montar_carrossel(
     produtos: Sequence[ProdutoCard],
     titulo: str,
     subtitulo: str = "",
-    marca: str = "Diquinhas e Promos",
+    marca: Optional[str] = None,
     variante: int = 0,
     chamada: str = "Quer o link?",
 ) -> list[Image.Image]:
@@ -452,6 +460,7 @@ def montar_carrossel(
     """
     if not produtos:
         raise ValueError("carrossel sem produtos")
+    marca = marca or marca_padrao()
     paleta = PALETAS[variante % len(PALETAS)]
     # 5 paletas × 3 capas (primos entre si): 15 dias seguidos sem repetir a combinação
     estilo = ESTILOS_CAPA[variante % len(ESTILOS_CAPA)]
