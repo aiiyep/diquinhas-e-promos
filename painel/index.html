@@ -131,7 +131,7 @@
 
   <section id="whatsapp">
     <h2>Canal do WhatsApp <span class="wa-info" id="wa-info"></span></h2>
-    <p class="wa-dica">Postagens das últimas 48h, do maior desconto para o menor. Copie o texto, segure a foto para salvar e cole os dois no canal.</p>
+    <p class="wa-dica" id="wa-dica">Postagens das últimas 48h, do maior desconto para o menor. Copie o texto, segure a foto para salvar e cole os dois no canal.</p>
     <div class="wa-lista" id="wa-lista"></div>
     <button class="wa-mais" id="wa-mais" hidden>Mostrar todas</button>
   </section>
@@ -312,6 +312,49 @@
     if (!ok) throw new Error("cópia bloqueada");
   }
 
+  // Em https (tailscale serve) a página consegue ler a foto pelo painel e copiar ou compartilhar
+  const SEGURO = window.isSecureContext;
+  const PODE_COPIAR_FOTO = SEGURO && !!(navigator.clipboard && navigator.clipboard.write && window.ClipboardItem);
+  const PODE_COMPARTILHAR = SEGURO && !!(navigator.share && navigator.canShare);
+  const fotos = new Map();
+
+  function baixarFoto(id) {
+    if (!fotos.has(id)) {
+      const p = fetch(`/api/whatsapp/foto?id=${encodeURIComponent(id)}`).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.blob();
+      });
+      p.catch(() => fotos.delete(id));
+      fotos.set(id, p);
+    }
+    return fotos.get(id);
+  }
+
+  // A área de transferência só aceita PNG em todos os navegadores; converte pelo canvas
+  async function fotoEmPng(id) {
+    const blob = await baixarFoto(id);
+    if (blob.type === "image/png") return blob;
+    const bmp = await createImageBitmap(blob);
+    const canvas = el("canvas");
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
+    canvas.getContext("2d").drawImage(bmp, 0, 0);
+    return new Promise((ok, falha) => canvas.toBlob(b => b ? ok(b) : falha(new Error("conversão")), "image/png"));
+  }
+
+  async function compartilhar(p) {
+    const blob = await baixarFoto(p.id);
+    const ext = (blob.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
+    const arquivo = new File([blob], `oferta-${p.id}.${ext}`, { type: blob.type });
+    const dados = { files: [arquivo], text: p.texto };
+    await navigator.share(navigator.canShare(dados) ? dados : { text: p.texto });
+  }
+
+  function piscar(botao, texto, original) {
+    botao.textContent = texto;
+    setTimeout(() => { botao.textContent = original; }, 2500);
+  }
+
   async function marcar(id, status) {
     const resp = await fetch("/api/whatsapp/marcar", {
       method: "POST",
@@ -334,8 +377,35 @@
     const item = el("div", { class: "wa-item" },
       el("div", { class: "wa-topo" }, foto, el("div", {}, meta, el("div", { class: "wa-titulo", text: p.titulo || p.id }))),
       el("pre", { class: "wa-texto", text: p.texto }));
-    const botoes = el("div", { class: "wa-botoes" }, copiar);
-    if (p.imagem_url && /^https?:\/\//.test(p.imagem_url)) {
+    const botoes = el("div", { class: "wa-botoes" });
+    const temFoto = p.imagem_url && /^https?:\/\//.test(p.imagem_url);
+    if (temFoto && PODE_COMPARTILHAR) {
+      const share = el("button", { class: "principal", text: "Compartilhar" });
+      share.addEventListener("click", async () => {
+        try { await compartilhar(p); } catch (e) {
+          if (e.name !== "AbortError") piscar(share, "falhou", "Compartilhar");
+        }
+      });
+      botoes.append(share);
+      copiar.classList.remove("principal");
+      // Baixa antes do clique: o navegador só abre o compartilhamento logo após o toque
+      baixarFoto(p.id).catch(() => {});
+    }
+    botoes.append(copiar);
+    if (temFoto && PODE_COPIAR_FOTO) {
+      const copiarFoto = el("button", { text: "Copiar foto" });
+      copiarFoto.addEventListener("click", async () => {
+        try {
+          // Passa a promessa direto: o Safari exige que o write aconteça no mesmo clique
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": fotoEmPng(p.id) })]);
+          piscar(copiarFoto, "Foto copiada!", "Copiar foto");
+        } catch {
+          piscar(copiarFoto, "falhou", "Copiar foto");
+        }
+      });
+      botoes.append(copiarFoto);
+    }
+    if (temFoto) {
       botoes.append(el("a", { href: p.imagem_url, target: "_blank", rel: "noopener noreferrer", text: "Abrir foto" }));
     }
     const postei = el("button", { text: "✓ Postei" });
@@ -394,6 +464,13 @@
 
   atualizar();
   setInterval(atualizar, 10000);
+  if (PODE_COMPARTILHAR) {
+    $("wa-dica").textContent = "Postagens das últimas 48h, do maior desconto para o menor. " +
+      "Toque em Compartilhar, escolha o WhatsApp e o canal: foto e texto vão juntos.";
+  } else if (PODE_COPIAR_FOTO) {
+    $("wa-dica").textContent = "Postagens das últimas 48h, do maior desconto para o menor. " +
+      "Copie a foto e cole no canal, depois copie o texto e cole como legenda.";
+  }
   atualizarFila();
   setInterval(() => { if (!pausado) atualizarFila(); }, 60000);
 </script>

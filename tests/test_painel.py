@@ -17,6 +17,11 @@ def _tarefa(nicho: str) -> None:
 def painel(tmp_path):
     db = HistoricoDB(tmp_path / "h.db")
     db.registrar_postagem("MLB1", "Moda", titulo="Vestido <b>Midi</b>", preco=89.9, link="https://x.com", loja="mercado_livre")
+    # Postado há 3 dias: fora da fila do WhatsApp, mas ainda tem foto para o painel
+    db.registrar_postagem("MLB2", "Moda", titulo="Saia", preco=50.0, link="https://y.com", imagem_url="https://img.example/2.jpg")
+    with db._conectar() as conn:
+        conn.execute("UPDATE ofertas_enviadas SET data_envio = '2000-01-01T00:00:00' WHERE id_produto = 'MLB2';")
+        conn.commit()
     db.registrar_disparo("Moda", True, "Vestido Midi")
 
     logs = MemoriaLogHandler(capacidade=2)
@@ -89,3 +94,61 @@ def test_marcar_whatsapp_rejeita_pedidos_invalidos(painel):
         with pytest.raises(urllib.error.HTTPError) as erro:
             _post(f"{painel}/api/whatsapp/marcar", corpo, cabecalho)
         assert erro.value.code == codigo
+
+
+def test_foto_do_produto_passa_pelo_painel(painel, monkeypatch):
+    from painel import servidor
+
+    pedidas = []
+
+    def fake_baixar(url):
+        pedidas.append(url)
+        return b"\x89PNG-fake", "image/png"
+
+    monkeypatch.setattr(servidor, "baixar_foto", fake_baixar)
+
+    with urllib.request.urlopen(f"{painel}/api/whatsapp/foto?id=MLB2") as resp:
+        assert resp.headers["Content-Type"] == "image/png"
+        assert resp.read() == b"\x89PNG-fake"
+    assert pedidas == ["https://img.example/2.jpg"]
+
+    # produto sem foto, inexistente ou sem id: 404 e nada é baixado
+    for consulta in ("?id=MLB1", "?id=NAOEXISTE", ""):
+        with pytest.raises(urllib.error.HTTPError) as erro:
+            urllib.request.urlopen(f"{painel}/api/whatsapp/foto{consulta}")
+        assert erro.value.code == 404
+    assert len(pedidas) == 1
+
+
+def test_foto_com_falha_no_download_responde_502(painel, monkeypatch):
+    from painel import servidor
+
+    def falha(url):
+        raise ValueError("não é imagem")
+
+    monkeypatch.setattr(servidor, "baixar_foto", falha)
+    with pytest.raises(urllib.error.HTTPError) as erro:
+        urllib.request.urlopen(f"{painel}/api/whatsapp/foto?id=MLB2")
+    assert erro.value.code == 502
+
+
+def test_baixar_foto_recusa_o_que_nao_e_imagem(monkeypatch):
+    from painel import servidor
+
+    class _Resp:
+        def __init__(self, tipo, corpo):
+            self.headers = {"Content-Type": tipo}
+            self._corpo = corpo
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, _tamanho):
+            yield self._corpo
+
+    monkeypatch.setattr(servidor.requests, "get", lambda *a, **k: _Resp("image/jpeg; q=1", b"jpg"))
+    assert servidor.baixar_foto("https://x/1.jpg") == (b"jpg", "image/jpeg")
+
+    monkeypatch.setattr(servidor.requests, "get", lambda *a, **k: _Resp("text/html", b"<html>"))
+    with pytest.raises(ValueError):
+        servidor.baixar_foto("https://x/1.jpg")

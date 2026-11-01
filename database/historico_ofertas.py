@@ -206,6 +206,14 @@ class HistoricoDB:
         with self._conectar() as conn:
             return [dict(row) for row in conn.execute(query, (desde, limite))]
 
+    def imagem_do_produto(self, id_produto: str) -> Optional[str]:
+        """URL da foto gravada para o produto (None se ele não existe ou não tem foto)."""
+        with self._conectar() as conn:
+            row = conn.execute(
+                "SELECT imagem_url FROM ofertas_enviadas WHERE id_produto = ?;", (str(id_produto).strip(),)
+            ).fetchone()
+        return row["imagem_url"] if row and row["imagem_url"] else None
+
     def marcar_whatsapp(self, id_produto: str, status: str) -> bool:
         """Marca um produto da fila como `postado` ou `pulado` no canal. True se ele existia."""
         if status not in STATUS_WHATSAPP:
