@@ -338,6 +338,26 @@ class MercadoLivreExtractor:
         # o modelo zera "De" que não for maior que o preço atual
         return oferta if oferta.preco_original else None
 
+    # Atributos do catálogo que não dizem nada sobre o produto
+    _ATRIBUTOS_IGNORADOS = {"Título manual", "Origem do dado do pacote de fábrica", "Formato de venda", "É kit"}
+
+    def detalhes_produto(self, prod_id: str, max_atributos: int = 18) -> Optional[dict[str, Any]]:
+        """
+        Descrição curta e atributos do produto de catálogo (cache de 24h). Usado no "Vale a pena?"
+        do Instagram, para o texto se basear no que a ficha oficial diz.
+        """
+        headers = self._headers_oficiais()
+        prod = self._produto_catalogo(prod_id, headers) if headers else None
+        if not prod:
+            return None
+        descricao = ((prod.get("short_description") or {}).get("content") or "").strip()
+        atributos = [
+            f"{a.get('name')}: {a.get('value_name')}"
+            for a in prod.get("attributes") or []
+            if a.get("name") and a.get("value_name") and a.get("name") not in self._ATRIBUTOS_IGNORADOS
+        ][:max_atributos]
+        return {"descricao": descricao[:1200], "atributos": atributos}
+
     @staticmethod
     def _ordenar_por_desconto(ofertas: list[ProdutoOferta]) -> list[ProdutoOferta]:
         return sorted(ofertas, key=lambda o: o.preco_promocional / (o.preco_original or o.preco_promocional))

@@ -459,6 +459,205 @@ def card_final(paleta: Paleta, marca: str, chamada: str = "Quer o link?") -> Ima
     return base.convert("RGB")
 
 
+# ---------------------------------------------------------------- "Vale a pena?" e meme
+
+# A Poppins não tem emoji nem a maioria dos símbolos: o que não for texto latino sai do card
+_PERMITIDOS_EXTRA = set("…–—“”‘’•·ºª°")
+
+
+def limpar_para_card(texto: str) -> str:
+    limpo = "".join(c for c in texto if ord(c) < 0x2000 or c in _PERMITIDOS_EXTRA)
+    return "\n".join(" ".join(linha.split()) for linha in limpo.splitlines()).strip()
+
+
+def formatar_vendas(vendas: Optional[int]) -> str:
+    if not vendas or vendas < 50:
+        return ""
+    if vendas >= 1000:
+        return f"+{vendas // 1000} mil vendidos"
+    return f"+{vendas // 50 * 50} vendidos"
+
+
+def _icone(draw: ImageDraw.ImageDraw, x: float, y: float, r: float, tipo: str, paleta: Paleta) -> None:
+    """Bolinha com ✓, ! ou → desenhado à mão (a fonte não tem os símbolos)."""
+    cor = paleta.destaque if tipo != "alerta" else "#E8890C"
+    draw.ellipse((x - r, y - r, x + r, y + r), fill=cor)
+    branco = paleta.selo_texto
+    espessura = max(4, int(r * 0.22))
+    if tipo == "check":
+        draw.line((x - r * 0.45, y + r * 0.02, x - r * 0.1, y + r * 0.38, x + r * 0.5, y - r * 0.35),
+                  fill=branco, width=espessura, joint="curve")
+    elif tipo == "alerta":
+        draw.line((x, y - r * 0.5, x, y + r * 0.12), fill=branco, width=espessura)
+        draw.ellipse((x - r * 0.13, y + r * 0.3, x + r * 0.13, y + r * 0.56), fill=branco)
+    else:
+        draw.line((x - r * 0.45, y, x + r * 0.4, y), fill=branco, width=espessura)
+        draw.line((x + r * 0.05, y - r * 0.38, x + r * 0.45, y, x + r * 0.05, y + r * 0.38),
+                  fill=branco, width=espessura, joint="curve")
+
+
+def _rotulo(draw: ImageDraw.ImageDraw, x: int, y: int, texto: str, paleta: Paleta) -> int:
+    fonte = _fonte("Bold", 30)
+    largura = fonte.getlength(texto.upper()) + 48
+    draw.rounded_rectangle((x, y, x + largura, y + 56), 28, fill=paleta.destaque)
+    draw.text((x + 24, y + 9), texto.upper(), font=fonte, fill=paleta.selo_texto)
+    return y + 56
+
+
+def card_topicos(
+    paleta: Paleta,
+    marca: str,
+    rotulo: str,
+    titulo: str,
+    itens: Sequence[str],
+    icone: str = "check",
+    foto: Optional[Image.Image] = None,
+    posicao: str = "",
+) -> Image.Image:
+    """Card de texto: rótulo, título grande e uma lista com ícones (pontos fortes, pra quem é…)."""
+    base = _fundo(paleta).convert("RGBA")
+    _cabecalho(base, paleta, marca, posicao)
+    lado_foto = 220
+    largura_titulo = LARGURA - 2 * _MARGEM - (lado_foto + 30 if foto is not None else 0)
+    if foto is not None:
+        caixa = (LARGURA - _MARGEM - lado_foto, 140, LARGURA - _MARGEM, 140 + lado_foto)
+        _sombra(base, caixa, 32, 40)
+        _colar_arredondado(base, _foto_no_cartao(foto, (lado_foto, lado_foto), paleta.cartao), caixa[:2], 32)
+    draw = ImageDraw.Draw(base)
+    y = _rotulo(draw, _MARGEM, 150, rotulo, paleta) + 26
+    fonte_t = _fonte("Black", 68)
+    for linha in _quebrar(limpar_para_card(titulo).upper(), fonte_t, largura_titulo, 3):
+        draw.text((_MARGEM, y), linha, font=fonte_t, fill=paleta.texto)
+        y += int(_altura(fonte_t) * 0.86)
+    y = max(y + 40, (140 + lado_foto + 50) if foto is not None else 0)
+
+    itens = [limpar_para_card(i) for i in itens if limpar_para_card(i)]
+    disponivel = ALTURA - 170 - y
+    largura_txt = LARGURA - 2 * _MARGEM - 100
+    for tam in (54, 50, 46, 42, 38, 35, 32):
+        fonte = _fonte("SemiBold", tam)
+        blocos = [_quebrar(i, fonte, largura_txt, 4) for i in itens]
+        altura = sum(len(b) * _altura(fonte) * 1.02 for b in blocos) + 34 * (len(blocos) - 1)
+        if altura <= disponivel:
+            break
+    y += max(0, (disponivel - altura) / 2.4)
+    for bloco in blocos:
+        _icone(draw, _MARGEM + 30, y + _altura(fonte) * 0.52, 30, icone, paleta)
+        for linha in bloco:
+            draw.text((_MARGEM + 90, y), linha, font=fonte, fill=paleta.texto)
+            y += _altura(fonte) * 1.02
+        y += 34
+    _rodape_link(base, paleta)
+    return base.convert("RGB")
+
+
+def card_veredito(
+    p: ProdutoCard, frase: str, paleta: Paleta, marca: str, posicao: str = "", vendas: Optional[int] = None
+) -> Image.Image:
+    base = _fundo(paleta).convert("RGBA")
+    _cabecalho(base, paleta, marca, posicao)
+    draw = ImageDraw.Draw(base)
+    y = _rotulo(draw, _MARGEM, 150, "Veredito", paleta) + 30
+    largura = LARGURA - 2 * _MARGEM
+    for tam in (60, 54, 48, 44):
+        fonte = _fonte("Bold", tam)
+        linhas = _quebrar(limpar_para_card(frase), fonte, largura, 5)
+        if len(linhas) * _altura(fonte) * 0.95 <= 420:
+            break
+    for linha in linhas:
+        draw.text((_MARGEM, y), linha, font=fonte, fill=paleta.texto)
+        y += int(_altura(fonte) * 0.95)
+
+    lado = 400
+    topo = ALTURA - 160 - lado
+    caixa = (_MARGEM, topo, _MARGEM + lado, topo + lado)
+    _sombra(base, caixa, 40, 45)
+    _colar_arredondado(base, _foto_no_cartao(p.foto, (lado, lado), paleta.cartao), caixa[:2], 40)
+    if p.desconto:
+        _etiqueta(base, _MARGEM + 18, topo + 18, f"-{p.desconto}%", paleta)
+    x = _MARGEM + lado + 40
+    draw = ImageDraw.Draw(base)
+    fim = _bloco_preco(draw, p, paleta, x, topo + 90, tam=80)
+    if p.avaliacao:
+        _nota(draw, p, paleta, x - 4, fim + 20)
+        fim += 70
+    if formatar_vendas(vendas):
+        draw.text((x, fim + 20), formatar_vendas(vendas), font=_fonte("Medium", 34), fill=paleta.suave)
+    _rodape_link(base, paleta)
+    return base.convert("RGB")
+
+
+def montar_vale_a_pena(
+    p: ProdutoCard,
+    nome: str,
+    o_que_e: str,
+    pontos_fortes: Sequence[str],
+    atencao: Sequence[str],
+    pra_quem: Sequence[str],
+    veredito: str,
+    marca: Optional[str] = None,
+    variante: int = 0,
+    dia: Optional[date] = None,
+    vendas: Optional[int] = None,
+) -> list[Image.Image]:
+    """Capa "Vale a pena?" + o que é + pontos fortes + fica de olho + pra quem é + veredito + final."""
+    marca = marca or marca_padrao()
+    paleta = PALETAS[variante % len(PALETAS)]
+    cards = [capa([p], paleta, marca, "Vale a pena?", limpar_para_card(nome), "destaque", dia)]
+    paginas = [
+        ("O que é", nome, [o_que_e], "seta"),
+        ("Pontos fortes", "Por que chama atenção", pontos_fortes, "check"),
+        ("Fica de olho", "Antes de comprar", atencao, "alerta"),
+        ("Pra quem é", "Combina com você se…", pra_quem, "check"),
+    ]
+    paginas = [pg for pg in paginas if any(str(i).strip() for i in pg[2])]
+    total = len(paginas) + 1
+    for n, (rotulo, titulo, itens, icone) in enumerate(paginas, 1):
+        cards.append(card_topicos(paleta, marca, rotulo, titulo, itens, icone, p.foto, f"{n}/{total}"))
+    cards.append(card_veredito(p, veredito, paleta, marca, f"{total}/{total}", vendas))
+    cards.append(card_final(paleta, marca))
+    return cards
+
+
+def card_meme(texto: str, paleta: Paleta, marca: Optional[str] = None) -> Image.Image:
+    """Meme no formato de print de tweet, com a cara da página (sem curtidas nem números inventados)."""
+    marca = marca or marca_padrao()
+    base = _fundo(paleta).convert("RGBA")
+    largura = LARGURA - 2 * _MARGEM
+    pad = 56
+    paragrafos = limpar_para_card(texto).splitlines()
+    for tam in (60, 54, 48, 44, 40, 36):
+        fonte = _fonte("Medium", tam)
+        linhas: list[str] = []
+        for paragrafo in paragrafos:
+            linhas.extend(_quebrar(paragrafo, fonte, largura - 2 * pad, 6) if paragrafo else [""])
+        altura_txt = sum(_altura(fonte) * (1.05 if linha else 0.55) for linha in linhas)
+        if altura_txt <= 760:
+            break
+    altura_cartao = int(pad + 110 + 40 + altura_txt + pad)
+    y0 = (ALTURA - altura_cartao) // 2
+    caixa = (_MARGEM, y0, LARGURA - _MARGEM, y0 + altura_cartao)
+    _sombra(base, caixa, 44, 55)
+    draw = ImageDraw.Draw(base)
+    draw.rounded_rectangle(caixa, 44, fill="#FFFFFF")
+    ax, ay = _MARGEM + pad, y0 + pad
+    draw.ellipse((ax, ay, ax + 110, ay + 110), fill=paleta.destaque)
+    inicial = (marca.lstrip("@")[:1] or "D").upper()
+    fonte_ini = _fonte("Black", 60)
+    draw.text((ax + 55 - fonte_ini.getlength(inicial) / 2, ay + 14), inicial, font=fonte_ini, fill=paleta.selo_texto)
+    draw.text((ax + 140, ay + 12), "diquinhas & promos", font=_fonte("Bold", 40), fill="#14171A")
+    arroba = marca if marca.startswith("@") else "@" + marca.replace(" ", "").lower()
+    draw.text((ax + 140, ay + 62), arroba, font=_fonte("Regular", 32), fill="#657786")
+    y = ay + 110 + 40
+    for linha in linhas:
+        if linha:
+            draw.text((_MARGEM + pad, y), linha, font=fonte, fill="#14171A")
+            y += _altura(fonte) * 1.05
+        else:
+            y += _altura(fonte) * 0.55
+    return base.convert("RGB")
+
+
 def montar_carrossel(
     produtos: Sequence[ProdutoCard],
     titulo: str,

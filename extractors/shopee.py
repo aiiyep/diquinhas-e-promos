@@ -343,7 +343,7 @@ class ShopeeExtractor:
 
     def _consultar_lote_api(self, item_ids: list[int]) -> dict[str, dict[str, Any]]:
         """Uma requisição à Open API de Afiliados com vários `productOfferV2` (aliases do GraphQL)."""
-        campos = "itemId price priceMin priceMax priceDiscountRate ratingStar imageUrl"
+        campos = "itemId price priceMin priceMax priceDiscountRate ratingStar imageUrl sales shopName"
         consulta = " ".join(
             f"i{n}: productOfferV2(itemId: {item_id}){{nodes{{{campos}}}}}" for n, item_id in enumerate(item_ids)
         )
@@ -407,6 +407,9 @@ class ShopeeExtractor:
                 "preco_original": round(preco / (1 - taxa / 100), 2) if preco_unico and 0 < taxa < 95 else None,
                 "avaliacao": nota if nota and nota <= 5 else None,
                 "imagem_url": node.get("imageUrl") or oferta.get("imagem_url"),
+                # extras (não fazem parte do ProdutoOferta): usados no "Vale a pena?" do Instagram
+                "vendas": node.get("sales") if isinstance(node.get("sales"), int) else None,
+                "loja_nome": node.get("shopName") or None,
             }
             extras = {k: v for k, v in dados.items() if k not in ProdutoOferta.model_fields}
             validada = ProdutoOferta(**{k: v for k, v in dados.items() if k in ProdutoOferta.model_fields})

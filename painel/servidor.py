@@ -143,7 +143,8 @@ def montar_instagram(db: HistoricoDB) -> dict[str, Any]:
         posts.append(
             {
                 "id": post["id"],
-                "formato": instagram.FORMATOS[post["slot"]].nome if post["slot"] in instagram.FORMATOS else post["slot"],
+                "formato": instagram.FORMATOS[formato].nome if (formato := post.get("formato") or post["slot"])
+                in instagram.FORMATOS else formato,
                 "agendado": _formatar_data_db(post["agendado_para"]),
                 "status": post["status"],
                 "titulo": post["titulo"],
