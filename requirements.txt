@@ -4,3 +4,4 @@ pydantic==2.14.1
 python-dotenv==1.2.4
 APScheduler==3.11.3
 tzdata==2026.5
+Pillow==13.0.0
