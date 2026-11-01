@@ -343,16 +343,16 @@ class HistoricoDB:
         with self._conectar() as conn:
             return [self._post_instagram(row) for row in conn.execute(query, (slot, quando))]
 
-    def memes_instagram_recentes(self, dias: int = 60, limite: int = 40) -> list[str]:
-        """Textos dos memes dos últimos `dias` (menos os substituídos), para não repetir piada."""
+    def titulos_instagram_recentes(self, formato: str, dias: int = 60, limite: int = 40) -> list[str]:
+        """Títulos dos posts de um formato nos últimos `dias` (menos os substituídos), para não repetir tema."""
         desde = (_agora() - timedelta(days=dias)).isoformat(timespec="seconds")
         query = """
         SELECT titulo FROM instagram_posts
-        WHERE formato = 'meme' AND criado_em >= ? AND status != 'substituido' AND titulo IS NOT NULL
+        WHERE formato = ? AND criado_em >= ? AND status != 'substituido' AND titulo IS NOT NULL
         ORDER BY id DESC LIMIT ?;
         """
         with self._conectar() as conn:
-            return [row["titulo"] for row in conn.execute(query, (desde, limite))]
+            return [row["titulo"] for row in conn.execute(query, (formato, desde, limite))]
 
     def atualizar_post_instagram(self, post_id: int, status: str, **campos: Any) -> bool:
         """Muda o status (e, opcionalmente, `erro`, `ig_media_id`, `fb_post_id`). True se o post existia."""

@@ -70,7 +70,7 @@ def test_selecao_tira_masculino_e_titulos_quase_iguais():
 
 
 def test_horarios_configuraveis(monkeypatch):
-    assert [(s.chave, h, m) for s, h, m in instagram.horarios()] == [("valeapena", 11, 30), ("meme", 17, 30), ("top5", 21, 0)]
+    assert [(s.chave, h, m) for s, h, m in instagram.horarios()] == [("valeapena", 11, 30), ("dica", 17, 30), ("top5", 21, 0)]
     monkeypatch.setenv("INSTAGRAM_HORARIOS", "12:15, xx, 20:00")
     assert [(h, m) for _, h, m in instagram.horarios()] == [(12, 15), (17, 30), (20, 0)]
 
@@ -209,16 +209,16 @@ def test_jobs_do_instagram_no_agendador():
     assert jobs == {
         "instagram_preparar_valeapena": "cron[hour='10', minute='30']",
         "instagram_publicar_valeapena": "cron[hour='11', minute='30']",
-        "instagram_preparar_meme": "cron[hour='16', minute='30']",
-        "instagram_publicar_meme": "cron[hour='17', minute='30']",
+        "instagram_preparar_dica": "cron[hour='16', minute='30']",
+        "instagram_publicar_dica": "cron[hour='17', minute='30']",
         "instagram_preparar_top5": "cron[hour='20', minute='0']",
         "instagram_publicar_top5": "cron[hour='21', minute='0']",
     }
 
 
-# ---------------------------------------------------------------- "Vale a pena?" e meme
+# ---------------------------------------------------------------- "Vale a pena?" e dica
 
-from publishers.instagram_legenda import MEMES_PADRAO, gerar_meme, gerar_vale_a_pena  # noqa: E402
+from publishers.instagram_legenda import ESTILOS_DICA, gerar_dica, gerar_vale_a_pena, tema_do_dia  # noqa: E402
 
 PRODUTO_VALE = {
     "id_produto": "MLB1", "titulo": "Truss Uso Obrigatório Reconstrutor Capilar 260ml", "preco": 89.9,
@@ -280,37 +280,11 @@ def test_ordem_do_vale_a_pena_prefere_quem_tem_prova():
     assert [p["id_produto"] for p in instagram.ordenar_vale_a_pena(cands)] == ["MLB3", "SHOPEE2", "SHOPEE1"]
 
 
-def test_meme_da_ia_conferido_e_reserva(monkeypatch):
-    assert not gerar_meme([]).usou_ia and gerar_meme([]).texto == MEMES_PADRAO[0]
-    # o padrão já usado não volta
-    assert gerar_meme([MEMES_PADRAO[0]]).texto == MEMES_PADRAO[1]
+def test_sem_gemini_dica_e_vale_a_pena_usam_reserva(db, monkeypatch):
+    # sem Gemini, a dica vira "Abaixo de R$ X" e o "Vale a pena?" vira "Achado do dia"
+    dica = db.post_instagram(instagram.preparar_post(db, "dica", datetime(2026, 11, 2, 17, 30), agora=AGORA))
+    assert dica["slot"] == "dica" and dica["formato"] == "barato"
 
-    monkeypatch.setattr(instagram_legenda, "gemini_configurado", lambda: True)
-    monkeypatch.setattr(instagram_legenda, "gerar_json", lambda *a, **k: {
-        "memes": [
-            {"texto": "eu fingindo que não sou gorda", "legenda": "kkk"},  # zoa corpo: fora
-            {"texto": MEMES_PADRAO[2], "legenda": "repetido"},  # já usado: fora
-            {"texto": "ninguém:\n\neu organizando a gaveta de batom por cor de novo", "legenda": "Quem nunca? 💄"},
-        ],
-        "hashtags": ["#memes", "#beleza"],
-    })
-    t = gerar_meme([MEMES_PADRAO[2]])
-    assert t.usou_ia and t.texto == "ninguém:\n\neu organizando a gaveta de batom por cor de novo"
-    assert t.legenda.startswith("Quem nunca? 💄") and "#memes #beleza" in t.legenda
-    assert "#publi" not in t.legenda
-
-
-def test_preparar_meme_e_vale_a_pena_com_reserva(db, monkeypatch):
-    agendado = datetime(2026, 11, 2, 17, 30)
-    pid = instagram.preparar_post(db, "meme", agendado, agora=AGORA)
-    post = db.post_instagram(pid)
-    assert post["formato"] == "meme" and post["n_cards"] == 1 and post["produtos"] == []
-    assert db.memes_instagram_recentes() == [post["titulo"]]
-    # o meme seguinte é outro
-    outro = db.post_instagram(instagram.regerar_post(db, pid))
-    assert outro["titulo"] != post["titulo"] and db.post_instagram(pid)["status"] == "substituido"
-
-    # sem Gemini, o "Vale a pena?" vira "Achado do dia" no mesmo horário
     monkeypatch.setattr(instagram, "detalhes_produto", lambda p: {})
     vap = db.post_instagram(instagram.preparar_post(db, "valeapena", datetime(2026, 11, 2, 11, 30), agora=AGORA))
     assert vap["slot"] == "valeapena" and vap["formato"] == "achado"
@@ -330,11 +304,9 @@ def test_preparar_vale_a_pena_com_ia(db, monkeypatch):
 
 
 def test_travas_de_acento_dois_pontos_e_decimal(monkeypatch):
-    from publishers.instagram_legenda import _meme_ok, _sem_acento, _virgula_decimal
+    from publishers.instagram_legenda import _sem_acento, _virgula_decimal
 
     assert _sem_acento("eu: este mes nao vou comprar") and not _sem_acento("eu: este mês não vou comprar")
-    assert not _meme_ok("eu: vou só olhar\n\nminha conta bancária:", [])
-    assert _meme_ok("eu: vou só olhar\n\neu com 7 itens no carrinho", [])
     assert _virgula_decimal("nota 4.9 de 5") == "nota 4,9 de 5"
 
     monkeypatch.setattr(instagram_legenda, "gemini_configurado", lambda: True)
@@ -342,3 +314,66 @@ def test_travas_de_acento_dois_pontos_e_decimal(monkeypatch):
     monkeypatch.setattr(instagram_legenda, "gerar_json", lambda *a, **k: dict(resposta))
     t = gerar_vale_a_pena(PRODUTO_VALE, AGORA)
     assert t.pontos_fortes == ["Nota 4,8 de quem comprou", "Protege do calor"]
+
+
+RESPOSTA_DICA = {
+    "titulo_capa": "3 erros que estragam sua base",
+    "subtitulo": "O terceiro quase todo mundo comete",
+    "itens": [
+        {"titulo": "Pular o hidratante", "texto": "Pele sem hidratação deixa a base craquelada ao longo do dia."},
+        {"titulo": "Passar demais", "texto": "Comece com pouco produto e vá construindo a cobertura."},
+        {"titulo": "Eu uso esponja seca", "texto": "Relato pessoal: fora."},
+        {"titulo": "Esquecer o pescoço", "texto": "Esfume a base até o pescoço para não marcar a divisão."},
+        {"titulo": "Base cura espinhas", "texto": "Promessa: fora."},
+    ],
+    "busca": ["esponja", "Hidratante facial", "x"],
+    "abertura": "Sua base não fica bonita? Pode ser um desses 👀",
+    "hashtags": ["#maquiagem", "#base"],
+}
+
+
+def test_dica_confere_itens(monkeypatch):
+    monkeypatch.setattr(instagram_legenda, "gemini_configurado", lambda: True)
+    monkeypatch.setattr(instagram_legenda, "gerar_json", lambda *a, **k: dict(RESPOSTA_DICA))
+    erros = next(e for e in ESTILOS_DICA if e.chave == "erros")
+    t = gerar_dica("maquiagem", erros, [])
+    assert [i.titulo for i in t.itens] == ["Pular o hidratante", "Passar demais", "Esquecer o pescoço"]
+    assert [i.rotulo for i in t.itens] == ["Erro 1", "Erro 2", "Erro 3"]
+    assert t.busca == ["esponja", "hidratante facial"]
+
+    # tema repetido: pede de novo e desiste
+    assert gerar_dica("maquiagem", erros, ["3 erros que estragam a sua base"]) is None
+
+
+def test_dica_mito_ou_verdade(monkeypatch):
+    resposta = {**RESPOSTA_DICA, "itens": [
+        {"titulo": "Pele oleosa não precisa de hidratante", "texto": "Precisa sim, de textura leve.", "mito_ou_verdade": "mito"},
+        {"titulo": "Protetor solar vale em dia nublado", "texto": "Os raios UV passam pelas nuvens.", "mito_ou_verdade": "VERDADE"},
+        {"titulo": "Sabonete de rosto pode ser qualquer um", "texto": "O de corpo resseca o rosto.", "mito_ou_verdade": "MITO"},
+        {"titulo": "Sem veredito", "texto": "Fica de fora."},
+    ]}
+    monkeypatch.setattr(instagram_legenda, "gemini_configurado", lambda: True)
+    monkeypatch.setattr(instagram_legenda, "gerar_json", lambda *a, **k: resposta)
+    mito = next(e for e in ESTILOS_DICA if e.chave == "mito")
+    t = gerar_dica("skincare", mito, [])
+    assert [(i.rotulo, i.icone) for i in t.itens] == [("Mito", "alerta"), ("Verdade", "check"), ("Mito", "alerta")]
+
+
+def test_tema_do_dia_gira():
+    temas = {tema_do_dia(739000 + d) for d in range(12)}
+    assert len({a for a, _ in temas}) == 6 and len({e.chave for _, e in temas}) == 4
+
+
+def test_preparar_dica_com_achadinho(db, monkeypatch):
+    db.registrar_postagem("SHOPEE9", "Ofertas", titulo="Esponja de Maquiagem Gota", preco=9.9, link="https://s/9",
+                          loja="shopee", preco_original=19.9, imagem_url="https://img/9.jpg")
+    monkeypatch.setattr(instagram_legenda, "gemini_configurado", lambda: True)
+    monkeypatch.setattr(instagram_legenda, "gerar_json", lambda *a, **k: dict(RESPOSTA_DICA))
+    pid = instagram.preparar_post(db, "dica", datetime(2026, 11, 2, 17, 30), agora=AGORA)
+    post = db.post_instagram(pid)
+    assert post["formato"] == "dica" and post["titulo"] == "3 erros que estragam sua base"
+    assert [p["id"] for p in post["produtos"]] == ["SHOPEE9"]
+    assert post["n_cards"] == 6  # capa + 3 itens + 1 achadinho + final
+    assert "Esponja de Maquiagem Gota: R$ 9,90 (era R$ 19,90, 50% OFF)" in post["legenda"]
+    assert "#publi" in post["legenda"]
+    assert db.titulos_instagram_recentes("dica") == [post["titulo"]]
