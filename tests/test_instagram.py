@@ -25,7 +25,6 @@ def _c(i, preco, de=None, nota=None, titulo=None):
 def _sem_gemini(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.delenv("INSTAGRAM_HORARIOS", raising=False)
-    monkeypatch.delenv("INSTAGRAM_AUTO", raising=False)
 
 
 # ---------------------------------------------------------------- seleção
@@ -185,14 +184,42 @@ def test_publicar_do_horario(db, monkeypatch):
     assert publicados == [pid]
 
 
-def test_publicacao_automatica_publica_pendente(db, monkeypatch):
-    monkeypatch.setenv("INSTAGRAM_AUTO", "1")
+def test_sem_aprovacao_nada_sai_nem_com_a_antiga_chave_auto(db, monkeypatch):
+    monkeypatch.setenv("INSTAGRAM_AUTO", "1")  # não existe mais: pendente continua expirando
     agora = datetime(2026, 11, 2, 21, 0, tzinfo=instagram._TZ)
     publicados = []
     monkeypatch.setattr(instagram, "publicar_post", lambda banco, post: publicados.append(post["id"]))
     pid = instagram.preparar_do_horario(db, "top5", agora)
     instagram.publicar_do_horario(db, "top5", agora)
-    assert publicados == [pid]
+    assert publicados == [] and db.post_instagram(pid)["status"] == "expirado"
+
+
+def test_aviso_de_30_minutos(db):
+    agora = datetime(2026, 11, 2, 20, 30, tzinfo=instagram._TZ)
+    # nada preparado: avisa que não deu
+    texto, capa = instagram.aviso_do_horario(db, "top5", agora)
+    assert "não consegui montar" in texto and capa is None
+
+    pid = instagram.preparar_do_horario(db, "top5", agora)
+    texto, capa = instagram.aviso_do_horario(db, "top5", agora)
+    assert "<b>Instagram 21:00</b>" in texto and "Top do dia" in texto and capa.name == "00.jpg" and capa.is_file()
+
+    db.atualizar_post_instagram(pid, "aprovado")
+    assert instagram.aviso_do_horario(db, "top5", agora) is None
+
+
+def test_avisar_admin_sem_configuracao(monkeypatch):
+    import asyncio
+    from publishers import telegram_avisos
+
+    monkeypatch.setenv("TELEGRAM_ADMIN_CHAT_ID", "")
+    assert asyncio.run(telegram_avisos.avisar_admin("oi")) is False
+
+    monkeypatch.setenv("PAINEL_URL", "https://painel.exemplo.ts.net/")
+    teclado = telegram_avisos._botao_painel("#instagram")
+    assert teclado.inline_keyboard[0][0].url == "https://painel.exemplo.ts.net/#instagram"
+    monkeypatch.setenv("PAINEL_URL", "http://100.1.2.3:8080")
+    assert telegram_avisos._botao_painel() is None
 
 
 def test_status_invalido_e_recusado(db):
@@ -208,6 +235,9 @@ def test_jobs_do_instagram_no_agendador():
     jobs = {j.id: str(j.trigger) for j in sched.get_jobs() if j.id.startswith("instagram_")}
     assert jobs == {
         "instagram_preparar_valeapena": "cron[hour='10', minute='30']",
+        "instagram_avisar_valeapena": "cron[hour='11', minute='0']",
+        "instagram_avisar_dica": "cron[hour='17', minute='0']",
+        "instagram_avisar_top5": "cron[hour='20', minute='30']",
         "instagram_publicar_valeapena": "cron[hour='11', minute='30']",
         "instagram_preparar_dica": "cron[hour='16', minute='30']",
         "instagram_publicar_dica": "cron[hour='17', minute='30']",

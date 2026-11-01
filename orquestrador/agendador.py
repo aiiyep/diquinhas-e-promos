@@ -43,6 +43,7 @@ from extractors.filtros import eh_produto_masculino
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
 from orquestrador import instagram
+from publishers.telegram_avisos import avisar_admin
 from publishers.telegram_publisher import publish_product_to_telegram
 
 logger = logging.getLogger("diquinhas_e_promos.agendador")
@@ -485,6 +486,16 @@ async def preparar_instagram(slot: str) -> None:
         db.registrar_disparo("Instagram", False, f"Erro ao preparar '{slot}': {exc}")
 
 
+async def avisar_instagram(slot: str) -> None:
+    """30 min antes do horário: avisa no privado do Telegram se o post ainda não foi aprovado."""
+    try:
+        aviso = await asyncio.to_thread(instagram.aviso_do_horario, db, slot)
+        if aviso:
+            await avisar_admin(aviso[0], aviso[1], ancora="#instagram")
+    except Exception as exc:
+        logger.error("Erro ao avisar sobre o post '%s' do Instagram: %s", slot, exc)
+
+
 async def publicar_instagram(slot: str) -> None:
     """No horário: publica o carrossel aprovado (ou expira o que ficou pendente)."""
     try:
@@ -504,6 +515,13 @@ def _registrar_jobs_instagram(target_scheduler: AsyncIOScheduler) -> None:
             args=[slot.chave], id=f"instagram_preparar_{slot.chave}",
             name=f"INSTAGRAM - preparar '{nome}' ({preparar_em:%H:%M})",
             replace_existing=True, misfire_grace_time=1800,
+        )
+        avisar_em = publicar_em - instagram.AVISO_ANTES
+        target_scheduler.add_job(
+            avisar_instagram, trigger="cron", hour=avisar_em.hour, minute=avisar_em.minute,
+            args=[slot.chave], id=f"instagram_avisar_{slot.chave}",
+            name=f"INSTAGRAM - avisar se '{nome}' não foi aprovado ({avisar_em:%H:%M})",
+            replace_existing=True, misfire_grace_time=600,
         )
         target_scheduler.add_job(
             publicar_instagram, trigger="cron", hour=hora, minute=minuto,

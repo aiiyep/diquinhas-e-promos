@@ -589,10 +589,9 @@
     igAssinatura = dados.posts.map((p) => `${p.id}:${p.status}`).join(",");
     const pendentes = dados.posts.filter((p) => p.status === "pendente").length;
     $("ig-info").textContent = pendentes ? `${pendentes} aguardando aprovação` : "";
-    $("ig-dica").textContent = `O bot monta cada carrossel 1h antes de ${dados.horarios.join(", ")}. ` +
-      (dados.automatico ? "Publicação automática ligada: o que estiver pendente sai no horário."
-        : "Aprove até o horário; o que não for aprovado não sai. Enquanto a publicação automática não estiver " +
-          "ligada, use Compartilhar imagens → Instagram, cole a legenda e toque em \"Marquei como publicado\".");
+    $("ig-dica").textContent = `O bot monta cada post 1h antes de ${dados.horarios.join(", ")} e avisa no ` +
+      "Telegram 30 min antes se ainda não estiver aprovado. Só o que você aprovar vai ao ar. Por enquanto, " +
+      "publique com Compartilhar imagens → Instagram, cole a legenda e toque em \"Marquei como publicado\".";
     $("ig-lista").replaceChildren(...(dados.posts.length ? dados.posts.map(itemInstagram) :
       [el("div", { class: "vazio", text: "Nenhum carrossel ainda. O primeiro sai 1h antes do próximo horário." })]));
   }

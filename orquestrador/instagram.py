@@ -10,8 +10,9 @@ Posts do Instagram: 3 por dia, cada horário com um formato.
 
 Uma hora antes de cada horário o bot prepara o post (`preparar_post`): pega o que já foi postado
 no Telegram nas últimas 72h, confere o preço de novo na loja, monta os cards e a legenda e deixa
-o post "pendente" no painel. No horário (`publicar_do_horario`), o post aprovado é publicado; o que
-não foi aprovado expira, a menos que `INSTAGRAM_AUTO=1`. Um produto não volta ao Instagram por 14
+o post "pendente" no painel. 30 min antes do horário (`aviso_do_horario`), se ainda estiver pendente,
+o bot avisa no privado do Telegram. No horário (`publicar_do_horario`), só o post aprovado é
+publicado; o que não foi aprovado expira. Não existe publicação sem aprovação. Um produto não volta ao Instagram por 14
 dias. Horários em `INSTAGRAM_HORARIOS` (ex.: "11:30,17:30,21:00", na ordem acima).
 """
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from html import escape
 import logging
 from pathlib import Path
 import re
@@ -58,7 +60,8 @@ logger = logging.getLogger("diquinhas_e_promos.instagram")
 
 _TZ = ZoneInfo("America/Sao_Paulo")
 PASTA_CARDS = Path(__file__).resolve().parent.parent / "data" / "instagram"
-ANTECEDENCIA = timedelta(hours=1)
+ANTECEDENCIA = timedelta(hours=1)  # preparo
+AVISO_ANTES = timedelta(minutes=30)  # aviso no Telegram se ainda estiver pendente
 HORAS_CANDIDATOS = 72
 DIAS_SEM_REPETIR = 14
 DIAS_GUARDAR_CARDS = 10
@@ -97,10 +100,6 @@ LISTAS: dict[str, FormatoLista] = {
 
 def instagram_ativo() -> bool:
     return env("INSTAGRAM_ATIVO", "1") != "0"
-
-
-def publicacao_automatica() -> bool:
-    return env("INSTAGRAM_AUTO", "0") == "1"
 
 
 def horarios() -> list[tuple[Slot, int, int]]:
@@ -499,11 +498,38 @@ def publicar_post(db: HistoricoDB, post: dict[str, Any]) -> bool:
 def publicar_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[datetime] = None) -> None:
     agendado = agendado_hoje(slot_chave, agora)
     for post in db.posts_instagram_do_horario(slot_chave, agendado):
-        if post["status"] == "aprovado" or (post["status"] == "pendente" and publicacao_automatica()):
+        # Só o que foi aprovado no painel vai ao ar
+        if post["status"] == "aprovado":
             publicar_post(db, post)
         elif post["status"] == "pendente":
             db.atualizar_post_instagram(post["id"], "expirado")
             db.registrar_disparo("Instagram", False, f"'{post['titulo'][:60]}' não foi aprovado a tempo e expirou")
+
+
+def aviso_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[datetime] = None) -> Optional[tuple[str, Optional[Path]]]:
+    """
+    Texto (HTML) e capa do aviso de 30 min antes, ou None se não há o que avisar (já aprovado,
+    descartado ou publicado à mão).
+    """
+    agendado = agendado_hoje(slot_chave, agora)
+    posts = db.posts_instagram_do_horario(slot_chave, agendado)
+    if any(p["status"] in ("aprovado", "publicado", "descartado") for p in posts):
+        return None
+    pendente = next((p for p in posts if p["status"] == "pendente"), None)
+    if pendente is None:
+        return (
+            f"⚠️ <b>Instagram {agendado:%H:%M}</b>: não consegui montar o post desse horário. "
+            "O motivo está em \"Últimos disparos\" no painel.",
+            None,
+        )
+    formato = FORMATOS.get(pendente.get("formato") or slot_chave)
+    capa = Path(pendente["pasta"]) / "00.jpg" if pendente.get("pasta") else None
+    texto = (
+        f"⏰ <b>Instagram {agendado:%H:%M}</b>: falta 30 min e o post ainda não foi aprovado.\n\n"
+        f"<b>{escape(formato.nome if formato else slot_chave)}</b>: {escape(str(pendente['titulo'] or '')[:200])}\n"
+        f"{pendente['n_cards']} cards. Aprove, gere outro ou descarte no painel. Sem aprovação, ele não sai."
+    )
+    return texto, capa
 
 
 def preparar_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[datetime] = None) -> Optional[int]:
