@@ -107,6 +107,10 @@ class HistoricoDB:
                 );
                 """
             )
+            # formato do conteúdo (o horário do "Vale a pena?" pode virar "Achado do dia")
+            colunas_ig = {row["name"] for row in conn.execute("PRAGMA table_info(instagram_posts);")}
+            if "formato" not in colunas_ig:
+                conn.execute("ALTER TABLE instagram_posts ADD COLUMN formato TEXT;")
             conn.commit()
 
     def foi_postado_recentemente(self, id_produto: str, dias_limite: int = 14) -> bool:
@@ -290,18 +294,20 @@ class HistoricoDB:
         pasta: str,
         n_cards: int,
         usou_ia: bool,
+        formato: Optional[str] = None,
     ) -> int:
         agora = _agora().isoformat(timespec="seconds")
         with self._conectar() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO instagram_posts
-                    (slot, agendado_para, criado_em, status, titulo, legenda, produtos, pasta, n_cards, usou_ia, status_em)
-                VALUES (?, ?, ?, 'pendente', ?, ?, ?, ?, ?, ?, ?);
+                    (slot, agendado_para, criado_em, status, titulo, legenda, produtos, pasta, n_cards, usou_ia, status_em,
+                     formato)
+                VALUES (?, ?, ?, 'pendente', ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     slot, agendado_para.replace(tzinfo=None).isoformat(timespec="seconds"), agora, titulo, legenda,
-                    json.dumps(produtos, ensure_ascii=False), pasta, n_cards, int(usou_ia), agora,
+                    json.dumps(produtos, ensure_ascii=False), pasta, n_cards, int(usou_ia), agora, formato or slot,
                 ),
             )
             conn.commit()
@@ -336,6 +342,17 @@ class HistoricoDB:
         quando = agendado_para.replace(tzinfo=None).isoformat(timespec="seconds")
         with self._conectar() as conn:
             return [self._post_instagram(row) for row in conn.execute(query, (slot, quando))]
+
+    def memes_instagram_recentes(self, dias: int = 60, limite: int = 40) -> list[str]:
+        """Textos dos memes dos últimos `dias` (menos os substituídos), para não repetir piada."""
+        desde = (_agora() - timedelta(days=dias)).isoformat(timespec="seconds")
+        query = """
+        SELECT titulo FROM instagram_posts
+        WHERE formato = 'meme' AND criado_em >= ? AND status != 'substituido' AND titulo IS NOT NULL
+        ORDER BY id DESC LIMIT ?;
+        """
+        with self._conectar() as conn:
+            return [row["titulo"] for row in conn.execute(query, (desde, limite))]
 
     def atualizar_post_instagram(self, post_id: int, status: str, **campos: Any) -> bool:
         """Muda o status (e, opcionalmente, `erro`, `ig_media_id`, `fb_post_id`). True se o post existia."""

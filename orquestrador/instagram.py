@@ -1,15 +1,16 @@
 """
-Carrosséis do Instagram: 3 por dia, cada horário com um formato.
+Posts do Instagram: 3 por dia, cada horário com um formato.
 
-    11h30  Achado do dia      capa "destaque", 1 a 3 produtos
-    17h30  Abaixo de R$ 30/50 capa "lista",    3 a 5 produtos
-    21h00  Top do dia         capa "grade",    3 a 5 produtos
+    11h30  Vale a pena?   análise de 1 produto (o que é, pontos fortes, fica de olho, pra quem é,
+                          veredito). Se nenhum produto render uma análise, cai para o "Achado do dia".
+    17h30  Meme           card de print de tweet, sem produto nem preço (para atrair gente nova)
+    21h00  Top do dia     carrossel com os maiores descontos, capa "grade", 3 a 5 produtos
 
-Uma hora antes de cada horário o bot prepara o carrossel (`preparar_post`): pega o que já foi
-postado no Telegram nas últimas 72h, confere o preço de novo na loja, monta os cards e a legenda e
-deixa o post "pendente" no painel. No horário (`publicar_do_horario`), o post aprovado é publicado;
-o que não foi aprovado expira, a menos que `INSTAGRAM_AUTO=1`. Um produto não volta ao Instagram
-por 14 dias. Horários em `INSTAGRAM_HORARIOS` (ex.: "11:30,17:30,21:00", na ordem dos formatos).
+Uma hora antes de cada horário o bot prepara o post (`preparar_post`): pega o que já foi postado
+no Telegram nas últimas 72h, confere o preço de novo na loja, monta os cards e a legenda e deixa
+o post "pendente" no painel. No horário (`publicar_do_horario`), o post aprovado é publicado; o que
+não foi aprovado expira, a menos que `INSTAGRAM_AUTO=1`. Um produto não volta ao Instagram por 14
+dias. Horários em `INSTAGRAM_HORARIOS` (ex.: "11:30,17:30,21:00", na ordem acima).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from typing import Any, Iterable, Optional
 import uuid
 from zoneinfo import ZoneInfo
 
+from PIL import Image
 import requests
 
 from config import env
@@ -31,8 +33,15 @@ from database.historico_ofertas import HistoricoDB
 from extractors.filtros import eh_produto_masculino
 from extractors.mercadolivre import MercadoLivreExtractor
 from extractors.shopee import ShopeeExtractor
-from publishers.instagram_cards import PALETAS, ProdutoCard, montar_carrossel, salvar_jpeg
-from publishers.instagram_legenda import FORMATOS, gerar_textos
+from publishers.instagram_cards import (
+    PALETAS,
+    ProdutoCard,
+    card_meme,
+    montar_carrossel,
+    montar_vale_a_pena,
+    salvar_jpeg,
+)
+from publishers.instagram_legenda import FORMATOS, gerar_meme, gerar_textos, gerar_vale_a_pena
 
 logger = logging.getLogger("diquinhas_e_promos.instagram")
 
@@ -42,24 +51,37 @@ ANTECEDENCIA = timedelta(hours=1)
 HORAS_CANDIDATOS = 72
 DIAS_SEM_REPETIR = 14
 DIAS_GUARDAR_CARDS = 10
-PRE_SELECAO = 24  # quantos candidatos têm o preço reconsultado por carrossel
+PRE_SELECAO = 24  # quantos candidatos têm o preço reconsultado por post
+TENTATIVAS_VALE_A_PENA = 4  # produtos testados até um render uma análise
 
 
 @dataclass(frozen=True)
 class Slot:
-    chave: str  # = formato
+    chave: str
     horario_padrao: str
+
+
+SLOTS: tuple[Slot, ...] = (
+    Slot("valeapena", "11:30"),
+    Slot("meme", "17:30"),
+    Slot("top5", "21:00"),
+)
+
+
+@dataclass(frozen=True)
+class FormatoLista:
+    """Carrossel de lista de produtos: estilo da capa e quantos produtos."""
+
     estilo_capa: str
     minimo: int
     maximo: int
 
 
-SLOTS: tuple[Slot, ...] = (
-    Slot("achado", "11:30", "destaque", 1, 3),
-    Slot("barato", "17:30", "lista", 3, 5),
-    Slot("top5", "21:00", "grade", 3, 5),
-)
-_SLOTS = {s.chave: s for s in SLOTS}
+LISTAS: dict[str, FormatoLista] = {
+    "achado": FormatoLista("destaque", 1, 3),  # reserva do "Vale a pena?"
+    "barato": FormatoLista("lista", 3, 5),
+    "top5": FormatoLista("grade", 3, 5),
+}
 
 
 def instagram_ativo() -> bool:
@@ -95,6 +117,12 @@ def agendado_hoje(slot_chave: str, agora: Optional[datetime] = None) -> datetime
     raise KeyError(slot_chave)
 
 
+def _variante(slot_chave: str, agendado_para: datetime) -> int:
+    """Paleta do post: muda a cada post (3 por dia, 5 paletas)."""
+    indice = [s.chave for s in SLOTS].index(slot_chave) if slot_chave in [s.chave for s in SLOTS] else 0
+    return agendado_para.toordinal() * len(SLOTS) + indice
+
+
 # ---------------------------------------------------------------- produtos
 
 
@@ -111,29 +139,47 @@ def _com_desconto(item: dict[str, Any]) -> dict[str, Any]:
     return {**item, "preco_original": original, "desconto": desconto_pct(item["preco"], original) or None}
 
 
-def selecionar(slot_chave: str, candidatos: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Optional[int]]:
-    """Escolhe e ordena os produtos do carrossel. Devolve (produtos, limite de preço do formato)."""
-    slot = _SLOTS[slot_chave]
+def _validos(candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # O histórico só tem o que passou no filtro do Telegram, mas o Instagram confere de novo
-    itens = [_com_desconto(c) for c in candidatos if c.get("preco") and not eh_produto_masculino(c.get("titulo") or "")]
+    return [_com_desconto(c) for c in candidatos if c.get("preco") and not eh_produto_masculino(c.get("titulo") or "")]
+
+
+def selecionar(formato: str, candidatos: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Optional[int]]:
+    """Escolhe e ordena os produtos de um carrossel de lista. Devolve (produtos, limite de preço)."""
+    lista = LISTAS[formato]
+    itens = _validos(candidatos)
     chave_desc = lambda p: (p["desconto"] or 0, p.get("avaliacao") or 0)  # noqa: E731
     limite = None
 
-    if slot_chave == "achado":
+    if formato == "achado":
         escolhidos = sorted(itens, key=chave_desc, reverse=True)
         if escolhidos and (escolhidos[0]["desconto"] or 0) < 15:
             # sem um desconto que valha o "achado", a estrela é o produto mais bem avaliado
             escolhidos.sort(key=lambda p: (p.get("avaliacao") or 0, p["desconto"] or 0), reverse=True)
-    elif slot_chave == "barato":
-        limite = 30 if sum(p["preco"] <= 30 for p in itens) >= slot.minimo else 50
+    elif formato == "barato":
+        limite = 30 if sum(p["preco"] <= 30 for p in itens) >= lista.minimo else 50
         escolhidos = sorted(
             (p for p in itens if p["preco"] <= limite), key=lambda p: (-(p["desconto"] or 0), p["preco"])
         )
     else:  # top5
         escolhidos = sorted((p for p in itens if p["desconto"]), key=chave_desc, reverse=True)
 
-    escolhidos = _sem_titulos_repetidos(escolhidos)[: slot.maximo]
-    return (escolhidos if len(escolhidos) >= slot.minimo else []), limite
+    escolhidos = _sem_titulos_repetidos(escolhidos)[: lista.maximo]
+    return (escolhidos if len(escolhidos) >= lista.minimo else []), limite
+
+
+def ordenar_vale_a_pena(candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Candidatos ao "Vale a pena?", do melhor para o pior: primeiro os que têm prova (nota 4,5+,
+    500+ vendas ou ficha do ML), e entre eles os do ML, cuja ficha (descrição e atributos) rende
+    uma análise mais rica; depois os com desconto de 15%+.
+    """
+    def chave(p: dict[str, Any]) -> tuple:
+        ficha = str(p["id_produto"]).startswith("MLB")
+        prova = ficha or (p.get("avaliacao") or 0) >= 4.5 or (p.get("vendas") or 0) >= 500
+        return (prova, ficha, (p["desconto"] or 0) >= 15, p.get("avaliacao") or 0, p["desconto"] or 0, p.get("vendas") or 0)
+
+    return _sem_titulos_repetidos(sorted(_validos(candidatos), key=chave, reverse=True))
 
 
 def _palavras(titulo: str) -> set[str]:
@@ -155,10 +201,10 @@ def _sem_titulos_repetidos(itens: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return saida
 
 
-def _pre_selecionar(slot_chave: str, candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _pre_selecionar(formato: str, candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Com o preço gravado no histórico, separa os candidatos mais promissores para reconsultar."""
     itens = [_com_desconto(c) for c in candidatos if c.get("preco")]
-    if slot_chave == "barato":
+    if formato == "barato":
         itens = [p for p in itens if p["preco"] <= 60]
         itens.sort(key=lambda p: (-(p["desconto"] or 0), p["preco"]))
     else:
@@ -168,8 +214,9 @@ def _pre_selecionar(slot_chave: str, candidatos: list[dict[str, Any]]) -> list[d
 
 def atualizar_precos(candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Reconsulta preço e "De" na loja (Shopee: Open API de Afiliados; ML: anúncio de menor preço do
-    produto de catálogo). Quem não puder ser conferido fica de fora: o card nunca mostra preço velho.
+    Reconsulta preço e "De" na loja (Shopee: Open API de Afiliados, que também traz nota, vendas e
+    loja; ML: anúncio de menor preço do produto de catálogo). Quem não puder ser conferido fica de
+    fora: o card nunca mostra preço velho.
     """
     atualizados: list[dict[str, Any]] = []
 
@@ -192,6 +239,7 @@ def atualizar_precos(candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     atualizados.append({
                         **c, "preco": novo["preco_promocional"], "preco_original": novo.get("preco_original"),
                         "avaliacao": novo.get("avaliacao"), "imagem_url": novo.get("imagem_url") or c.get("imagem_url"),
+                        "vendas": novo.get("vendas"), "loja_nome": novo.get("loja_nome"),
                     })
         else:
             logger.warning("Sem credenciais da Shopee: produtos da Shopee ficam fora do Instagram.")
@@ -210,6 +258,16 @@ def atualizar_precos(candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return atualizados
 
 
+def detalhes_produto(produto: dict[str, Any]) -> dict[str, Any]:
+    """Descrição e ficha técnica (só o ML entrega pela API; a Shopee manda nota, vendas e loja)."""
+    if str(produto["id_produto"]).startswith("MLB"):
+        try:
+            return MercadoLivreExtractor().detalhes_produto(produto["id_produto"]) or {}
+        except Exception as exc:
+            logger.warning("Ficha do ML indisponível para %s: %s", produto["id_produto"], exc)
+    return {}
+
+
 def _baixar_foto(url: str) -> Optional[bytes]:
     try:
         resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
@@ -220,7 +278,58 @@ def _baixar_foto(url: str) -> Optional[bytes]:
     return None
 
 
-# ---------------------------------------------------------------- preparo e publicação
+def _card_com_foto(produto: dict[str, Any]) -> Optional[ProdutoCard]:
+    foto = _baixar_foto(produto["imagem_url"]) if produto.get("imagem_url") else None
+    card = ProdutoCard.de_dict(produto, foto) if foto else None
+    return card if card and card.foto is not None else None
+
+
+def _resumo_produto(p: dict[str, Any], nome: str) -> dict[str, Any]:
+    return {k: p.get(k) for k in ("id_produto", "titulo", "preco", "preco_original", "desconto", "link", "loja")} | {
+        "id": p["id_produto"], "nome": nome,
+    }
+
+
+# ---------------------------------------------------------------- preparo
+
+
+def _candidatos(db: HistoricoDB, excluir: Iterable[str]) -> list[dict[str, Any]]:
+    usados = db.produtos_usados_instagram(DIAS_SEM_REPETIR)
+    bloqueados = set(usados) | set(excluir)
+    return [
+        c for c in db.candidatos_instagram(HORAS_CANDIDATOS)
+        if c["id_produto"] not in bloqueados
+        and not any(parecidos(c.get("titulo") or "", t) for t in usados.values())
+    ]
+
+
+def _salvar(
+    db: HistoricoDB,
+    slot_chave: str,
+    formato: str,
+    agendado_para: datetime,
+    titulo: str,
+    legenda: str,
+    produtos: list[dict[str, Any]],
+    imagens: list[Image.Image],
+    usou_ia: bool,
+    descricao: str,
+) -> int:
+    pasta = PASTA_CARDS / f"{agendado_para:%Y%m%d-%H%M}-{formato}-{uuid.uuid4().hex[:6]}"
+    pasta.mkdir(parents=True, exist_ok=True)
+    for i, img in enumerate(imagens):
+        salvar_jpeg(img, pasta / f"{i:02d}.jpg")
+    post_id = db.criar_post_instagram(
+        slot_chave, agendado_para, titulo, legenda, produtos, str(pasta), len(imagens), usou_ia, formato=formato
+    )
+    db.registrar_disparo("Instagram", True, f"{descricao} aguardando aprovação para {agendado_para:%H:%M}")
+    limpar_cards_antigos()
+    return post_id
+
+
+def _falhou(db: HistoricoDB, motivo: str) -> None:
+    logger.warning("Post do Instagram não montado. %s", motivo)
+    db.registrar_disparo("Instagram", False, motivo)
 
 
 def preparar_post(
@@ -230,72 +339,87 @@ def preparar_post(
     excluir: Iterable[str] = (),
     agora: Optional[datetime] = None,
 ) -> Optional[int]:
-    """Monta o carrossel do horário e o grava como pendente. Devolve o id, ou None se faltou produto."""
-    slot = _SLOTS[slot_chave]
+    """Monta o post do horário e o grava como pendente. Devolve o id, ou None se não deu."""
     agora = (agora or datetime.now(_TZ)).astimezone(_TZ)
-    usados = db.produtos_usados_instagram(DIAS_SEM_REPETIR)
-    bloqueados = set(usados) | set(excluir)
-    candidatos = [
-        c for c in db.candidatos_instagram(HORAS_CANDIDATOS)
-        if c["id_produto"] not in bloqueados
-        and not any(parecidos(c.get("titulo") or "", t) for t in usados.values())
-    ]
+    if slot_chave == "meme":
+        return _preparar_meme(db, agendado_para)
+    if slot_chave == "valeapena":
+        post_id = _preparar_vale_a_pena(db, agendado_para, excluir, agora)
+        if post_id:
+            return post_id
+        logger.info("Nenhum produto rendeu um 'Vale a pena?'; o horário vira 'Achado do dia'.")
+        return _preparar_lista(db, slot_chave, "achado", agendado_para, excluir, agora)
+    return _preparar_lista(db, slot_chave, slot_chave, agendado_para, excluir, agora)
 
-    produtos, limite = selecionar(slot_chave, atualizar_precos(_pre_selecionar(slot_chave, candidatos)))
 
-    cards_produtos: list[ProdutoCard] = []
+def _preparar_lista(
+    db: HistoricoDB, slot_chave: str, formato: str, agendado_para: datetime, excluir: Iterable[str], agora: datetime
+) -> Optional[int]:
+    lista = LISTAS[formato]
+    produtos, limite = selecionar(formato, atualizar_precos(_pre_selecionar(formato, _candidatos(db, excluir))))
+
+    cards: list[ProdutoCard] = []
     escolhidos: list[dict[str, Any]] = []
     for p in produtos:
-        foto = _baixar_foto(p["imagem_url"])
-        if foto is None:
-            continue
-        card = ProdutoCard.de_dict(p, foto)
-        if card.foto is None:
-            continue
-        cards_produtos.append(card)
-        escolhidos.append(p)
-
-    if len(escolhidos) < slot.minimo:
-        motivo = f"{FORMATOS[slot_chave].nome}: faltaram produtos inéditos com preço conferido ({len(escolhidos)})"
-        logger.warning("Carrossel do Instagram não montado. %s", motivo)
-        db.registrar_disparo("Instagram", False, motivo)
+        card = _card_com_foto(p)
+        if card:
+            cards.append(card)
+            escolhidos.append(p)
+    if len(escolhidos) < lista.minimo:
+        _falhou(db, f"{FORMATOS[formato].nome}: faltaram produtos inéditos com preço conferido ({len(escolhidos)})")
         return None
 
-    textos = gerar_textos(slot_chave, escolhidos, agora, limite)
-    for card, nome in zip(cards_produtos, textos.nomes):
+    textos = gerar_textos(formato, escolhidos, agora, limite)
+    for card, nome in zip(cards, textos.nomes):
         card.titulo = nome
-
-    indice = [s.chave for s in SLOTS].index(slot_chave)
-    variante = agendado_para.toordinal() * len(SLOTS) + indice
+    variante = _variante(slot_chave, agendado_para)
     imagens = montar_carrossel(
-        cards_produtos, textos.titulo_capa, textos.subtitulo, variante=variante,
-        estilo=slot.estilo_capa, dia=agendado_para.date(),
+        cards, textos.titulo_capa, textos.subtitulo, variante=variante, estilo=lista.estilo_capa,
+        dia=agendado_para.date(),
+    )
+    return _salvar(
+        db, slot_chave, formato, agendado_para, textos.titulo_capa, textos.legenda,
+        [_resumo_produto(p, n) for p, n in zip(escolhidos, textos.nomes)], imagens, textos.usou_ia,
+        f"Carrossel '{textos.titulo_capa}' ({len(escolhidos)} produtos, paleta {PALETAS[variante % len(PALETAS)].nome})",
     )
 
-    pasta = PASTA_CARDS / f"{agendado_para:%Y%m%d-%H%M}-{slot_chave}-{uuid.uuid4().hex[:6]}"
-    pasta.mkdir(parents=True, exist_ok=True)
-    for i, img in enumerate(imagens):
-        salvar_jpeg(img, pasta / f"{i:02d}.jpg")
 
-    resumo = [
-        {k: p.get(k) for k in ("id_produto", "titulo", "preco", "preco_original", "desconto", "link", "loja")}
-        | {"id": p["id_produto"], "nome": nome}
-        for p, nome in zip(escolhidos, textos.nomes)
-    ]
-    post_id = db.criar_post_instagram(
-        slot_chave, agendado_para, textos.titulo_capa, textos.legenda, resumo, str(pasta), len(imagens), textos.usou_ia
+def _preparar_vale_a_pena(
+    db: HistoricoDB, agendado_para: datetime, excluir: Iterable[str], agora: datetime
+) -> Optional[int]:
+    candidatos = ordenar_vale_a_pena(atualizar_precos(_pre_selecionar("achado", _candidatos(db, excluir))))
+    for produto in candidatos[:TENTATIVAS_VALE_A_PENA]:
+        card = _card_com_foto(produto)
+        if card is None:
+            continue
+        produto = {**produto, "detalhes": detalhes_produto(produto)}
+        textos = gerar_vale_a_pena(produto, agora)
+        if textos is None:
+            continue
+        card.titulo = textos.nome
+        imagens = montar_vale_a_pena(
+            card, textos.nome, textos.o_que_e, textos.pontos_fortes, textos.atencao, textos.pra_quem,
+            textos.veredito, variante=_variante("valeapena", agendado_para), dia=agendado_para.date(),
+            vendas=produto.get("vendas"),
+        )
+        return _salvar(
+            db, "valeapena", "valeapena", agendado_para, f"Vale a pena? {textos.nome}", textos.legenda,
+            [_resumo_produto(produto, textos.nome)], imagens, True, f"'Vale a pena?' de {textos.nome}",
+        )
+    return None
+
+
+def _preparar_meme(db: HistoricoDB, agendado_para: datetime) -> int:
+    textos = gerar_meme(db.memes_instagram_recentes())
+    imagem = card_meme(textos.texto, PALETAS[_variante("meme", agendado_para) % len(PALETAS)])
+    return _salvar(
+        db, "meme", "meme", agendado_para, textos.texto, textos.legenda, [], [imagem], textos.usou_ia,
+        "Meme" + ("" if textos.usou_ia else " (lista padrão)"),
     )
-    db.registrar_disparo(
-        "Instagram", True,
-        f"Carrossel '{textos.titulo_capa}' ({len(escolhidos)} produtos, paleta {PALETAS[variante % len(PALETAS)].nome}) "
-        f"aguardando aprovação para {agendado_para:%H:%M}",
-    )
-    limpar_cards_antigos()
-    return post_id
 
 
 def regerar_post(db: HistoricoDB, post_id: int) -> Optional[int]:
-    """'Gerar outro': monta um carrossel novo para o mesmo horário, sem os produtos do anterior."""
+    """'Gerar outro': monta um post novo para o mesmo horário, sem os produtos (ou o meme) do anterior."""
     antigo = db.post_instagram(post_id)
     if not antigo or antigo["status"] not in ("pendente", "aprovado", "descartado", "expirado", "falhou"):
         return None
@@ -307,17 +431,20 @@ def regerar_post(db: HistoricoDB, post_id: int) -> Optional[int]:
     return novo
 
 
+# ---------------------------------------------------------------- publicação
+
+
 def publicar_post(db: HistoricoDB, post: dict[str, Any]) -> bool:
     """
-    Publica o carrossel no Instagram (e na Página do Facebook). Ainda não configurado: a API exige
-    as imagens num endereço público e o token da Meta. Até lá, o post aprovado fica no painel para
-    ser publicado à mão (Compartilhar + Copiar legenda) e marcado como publicado.
+    Publica o post no Instagram (e na Página do Facebook). Ainda não configurado: a API exige as
+    imagens num endereço público e o token da Meta. Até lá, o post aprovado fica no painel para ser
+    publicado à mão (Compartilhar + Copiar legenda) e marcado como publicado.
     """
     logger.warning(
-        "Carrossel %s aprovado, mas a publicação automática no Instagram ainda não está configurada; "
+        "Post %s aprovado, mas a publicação automática no Instagram ainda não está configurada; "
         "publique pelo painel.", post["id"],
     )
-    db.registrar_disparo("Instagram", False, f"'{post['titulo']}' aprovado: publique pelo painel (API ainda não configurada)")
+    db.registrar_disparo("Instagram", False, f"'{post['titulo'][:60]}' aprovado: publique pelo painel (API ainda não configurada)")
     return False
 
 
@@ -328,14 +455,14 @@ def publicar_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[dateti
             publicar_post(db, post)
         elif post["status"] == "pendente":
             db.atualizar_post_instagram(post["id"], "expirado")
-            db.registrar_disparo("Instagram", False, f"'{post['titulo']}' não foi aprovado a tempo e expirou")
+            db.registrar_disparo("Instagram", False, f"'{post['titulo'][:60]}' não foi aprovado a tempo e expirou")
 
 
 def preparar_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[datetime] = None) -> Optional[int]:
     agendado = agendado_hoje(slot_chave, agora)
     ativos = [p for p in db.posts_instagram_do_horario(slot_chave, agendado) if p["status"] in ("pendente", "aprovado")]
     if ativos:
-        logger.info("Carrossel das %s já preparado (id %s).", f"{agendado:%H:%M}", ativos[0]["id"])
+        logger.info("Post das %s já preparado (id %s).", f"{agendado:%H:%M}", ativos[0]["id"])
         return ativos[0]["id"]
     return preparar_post(db, slot_chave, agendado, agora=agora)
 
