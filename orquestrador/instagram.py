@@ -12,7 +12,9 @@ Uma hora antes de cada horário o bot prepara o post (`preparar_post`): pega o q
 no Telegram nas últimas 72h, confere o preço de novo na loja, monta os cards e a legenda e deixa
 o post "pendente" no painel. 30 min antes do horário (`aviso_do_horario`), se ainda estiver pendente,
 o bot avisa no privado do Telegram. No horário (`publicar_do_horario`), só o post aprovado é
-publicado; o que não foi aprovado expira. Não existe publicação sem aprovação. Um produto não volta ao Instagram por 14
+publicado pela API da Meta (`publishers/instagram_api.py`); o que não foi aprovado expira. Se a API
+não estiver configurada ou a Meta recusar, o bot manda a capa e a legenda no privado para a
+publicação à mão. Não existe publicação sem aprovação. Um produto não volta ao Instagram por 14
 dias. Horários em `INSTAGRAM_HORARIOS` (ex.: "11:30,17:30,21:00", na ordem acima).
 """
 
@@ -38,6 +40,7 @@ from database.historico_ofertas import HistoricoDB
 from extractors.filtros import eh_produto_masculino
 from extractors.mercadolivre import MercadoLivreExtractor
 from extractors.shopee import ShopeeExtractor
+from publishers import instagram_api
 from publishers.instagram_cards import (
     PALETAS,
     ProdutoCard,
@@ -65,6 +68,7 @@ AVISO_ANTES = timedelta(minutes=30)  # aviso no Telegram se ainda estiver penden
 HORAS_CANDIDATOS = 72
 DIAS_SEM_REPETIR = 14
 DIAS_GUARDAR_CARDS = 10
+LIMITE_MENSAGEM_TELEGRAM = 4096
 PRE_SELECAO = 24  # quantos candidatos têm o preço reconsultado por post
 TENTATIVAS_VALE_A_PENA = 4  # produtos testados até um render uma análise
 
@@ -483,27 +487,94 @@ def regerar_post(db: HistoricoDB, post_id: int) -> Optional[int]:
 
 def publicar_post(db: HistoricoDB, post: dict[str, Any]) -> bool:
     """
-    Publica o post no Instagram (e na Página do Facebook). Ainda não configurado: a API exige as
-    imagens num endereço público e o token da Meta. Até lá, o post aprovado fica no painel para ser
-    publicado à mão (Compartilhar + Copiar legenda) e marcado como publicado.
+    Publica o post aprovado pela API da Meta (`publishers/instagram_api.py`). Sem a API configurada,
+    ou se a Meta recusar, devolve False: o post fica no painel (como "aprovado" ou "falhou") para ser
+    publicado à mão, e `publicar_do_horario` manda o aviso no privado do Telegram.
     """
-    logger.warning(
-        "Post %s aprovado, mas a publicação automática no Instagram ainda não está configurada; "
-        "publique pelo painel.", post["id"],
+    titulo = str(post.get("titulo") or "")[:60]
+    if not instagram_api.configurado():
+        logger.warning("Post %s aprovado, mas a API do Instagram não está configurada; publique pelo painel.", post["id"])
+        db.registrar_disparo("Instagram", False, f"'{titulo}' aprovado: publique pelo painel (API não configurada)")
+        return False
+    try:
+        media_id = instagram_api.publicar(instagram_api.urls_publicas(post["id"], post["n_cards"]), post["legenda"] or "")
+    except instagram_api.ErroInstagram as exc:
+        logger.error("Falha ao publicar o post %s no Instagram: %s", post["id"], exc)
+        db.atualizar_post_instagram(post["id"], "falhou", erro=str(exc))
+        db.registrar_disparo("Instagram", False, f"'{titulo}' não publicou: {exc}")
+        return False
+    db.atualizar_post_instagram(post["id"], "publicado", ig_media_id=media_id, erro=None)
+    db.registrar_disparo("Instagram", True, f"'{titulo}' publicado no Instagram")
+    return True
+
+
+def aviso_publicar_manual(post: dict[str, Any], agendado: datetime) -> list[tuple[str, Optional[Path]]]:
+    """
+    Mensagens para o privado do Telegram quando o post aprovado não pôde sair sozinho: a capa com
+    o passo a passo e, numa mensagem à parte, a legenda (fácil de copiar no celular).
+    """
+    formato = FORMATOS.get(post.get("formato") or post.get("slot") or "")
+    capa = Path(post["pasta"]) / "00.jpg" if post.get("pasta") else None
+    if post.get("status") == "falhou" and post.get("erro"):
+        motivo = f"A publicação automática falhou ({escape(str(post['erro'])[:300])})"
+    else:
+        motivo = "A publicação automática ainda não está conectada"
+    instrucoes = (
+        f"📲 <b>Instagram {agendado:%H:%M}: hora de postar</b>\n\n"
+        f"<b>{escape(formato.nome if formato else 'Post')}</b>: {escape(str(post.get('titulo') or '')[:200])}\n"
+        f"{post.get('n_cards', 0)} cards. {motivo}, então ele não saiu sozinho: "
+        "no painel, toque em Compartilhar imagens → Instagram, cole a legenda abaixo e depois em "
+        "\"Marquei como publicado\"."
     )
-    db.registrar_disparo("Instagram", False, f"'{post['titulo'][:60]}' aprovado: publique pelo painel (API ainda não configurada)")
-    return False
+    mensagens: list[tuple[str, Optional[Path]]] = [(instrucoes, capa)]
+    if post.get("legenda"):
+        mensagens.append((escape(str(post["legenda"]))[:LIMITE_MENSAGEM_TELEGRAM], None))
+    return mensagens
 
 
-def publicar_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[datetime] = None) -> None:
+def testar_api(db: HistoricoDB) -> str:
+    """
+    Confere a conexão de ponta a ponta SEM publicar: baixa um card pela URL pública (Funnel) e cria
+    um container na Meta, que expira sozinho em 24h sem aparecer no perfil. Devolve o relatório.
+    """
+    if not instagram_api.configurado():
+        return "Faltam META_ACCESS_TOKEN, META_IG_USER_ID ou META_MIDIA_URL (https) no .env."
+    post = next((p for p in db.posts_instagram(20) if p["status"] in ("pendente", "aprovado", "expirado", "falhou")
+                 and p["n_cards"] and p["pasta"] and (Path(p["pasta"]) / "00.jpg").is_file()), None)
+    if post is None:
+        return "Nenhum carrossel com cards no disco para testar. Rode de novo depois que o bot montar um post."
+    url = instagram_api.urls_publicas(post["id"], 1)[0]
+    try:
+        resp = requests.get(url, timeout=20)
+    except requests.RequestException as exc:
+        return f"A URL pública não respondeu ({exc}). Confira o Tailscale Funnel e o META_MIDIA_URL."
+    if resp.status_code != 200 or not resp.headers.get("Content-Type", "").startswith("image/"):
+        return f"A URL pública respondeu HTTP {resp.status_code}. Confira o Funnel e se o bot está rodando."
+    try:
+        container = instagram_api.criar_container([url], "teste de conexão (não publicado)")
+    except instagram_api.ErroInstagram as exc:
+        return f"A imagem abre, mas a Meta recusou: {exc}"
+    return f"OK: a Meta baixou o card do post {post['id']} e criou o container {container} (não publicado)."
+
+
+def publicar_do_horario(
+    db: HistoricoDB, slot_chave: str, agora: Optional[datetime] = None,
+) -> list[tuple[str, Optional[Path]]]:
+    """
+    Publica o aprovado e expira o pendente. Devolve os avisos para o privado do Telegram quando o
+    aprovado não saiu sozinho (API não configurada ou recusa da Meta).
+    """
     agendado = agendado_hoje(slot_chave, agora)
+    avisos: list[tuple[str, Optional[Path]]] = []
     for post in db.posts_instagram_do_horario(slot_chave, agendado):
         # Só o que foi aprovado no painel vai ao ar
         if post["status"] == "aprovado":
-            publicar_post(db, post)
+            if not publicar_post(db, post):
+                avisos.extend(aviso_publicar_manual(db.post_instagram(post["id"]) or post, agendado))
         elif post["status"] == "pendente":
             db.atualizar_post_instagram(post["id"], "expirado")
             db.registrar_disparo("Instagram", False, f"'{post['titulo'][:60]}' não foi aprovado a tempo e expirou")
+    return avisos
 
 
 def aviso_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[datetime] = None) -> Optional[tuple[str, Optional[Path]]]:

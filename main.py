@@ -9,7 +9,10 @@ from extractors.mercadolivre import MercadoLivreExtractor
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
 from orquestrador.agendador import configurar_agendador, db, disparar_oferta, scheduler
+from orquestrador import instagram
 from painel import iniciar_painel, memoria_logs
+from painel.midia import iniciar_midia
+from publishers import instagram_api
 from publishers.telegram_publisher import _resolve_thread_id, fechar_bot, publish_product_to_telegram
 
 logging.basicConfig(
@@ -105,6 +108,14 @@ async def iniciar_orquestrador_sprints(run_forever: bool = True) -> None:
         except OSError as exc:
             logger.error("Não foi possível iniciar o painel web: %s", exc)
 
+    if instagram_api.configurado():
+        try:
+            iniciar_midia(db, host=env("MIDIA_HOST", "127.0.0.1"), porta=int(env("MIDIA_PORTA", "8081")))
+        except OSError as exc:
+            logger.error("Não foi possível iniciar o servidor de imagens do Instagram: %s", exc)
+    else:
+        logger.warning("API do Instagram não configurada (META_* no .env): os posts aprovados saem à mão.")
+
     logger.info("Orquestrador em execução contínua. Pressione Ctrl+C para encerrar.")
     stop_event = asyncio.Event()
     await stop_event.wait()
@@ -128,10 +139,17 @@ async def main() -> None:
         action="store_true",
         help="Dispara imediatamente um lote completo (Shopee CSV + Containers ML).",
     )
+    parser.add_argument(
+        "--testar-instagram",
+        action="store_true",
+        help="Confere a API do Instagram e a URL pública dos cards criando um container SEM publicar.",
+    )
     args = parser.parse_args()
 
     try:
-        if args.test_nicho:
+        if args.testar_instagram:
+            print(await asyncio.to_thread(instagram.testar_api, db))
+        elif args.test_nicho:
             await disparar_oferta(args.test_nicho)
         elif args.run_all_now:
             await run_telegram_pipeline()

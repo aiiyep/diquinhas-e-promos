@@ -497,9 +497,14 @@ async def avisar_instagram(slot: str) -> None:
 
 
 async def publicar_instagram(slot: str) -> None:
-    """No horário: publica o carrossel aprovado (ou expira o que ficou pendente)."""
+    """
+    No horário: publica o carrossel aprovado (ou expira o que ficou pendente). Se o aprovado não
+    sair sozinho (API da Meta ainda não conectada), manda capa e legenda no privado do Telegram.
+    """
     try:
-        await asyncio.to_thread(instagram.publicar_do_horario, db, slot)
+        avisos = await asyncio.to_thread(instagram.publicar_do_horario, db, slot)
+        for texto, foto in avisos:
+            await avisar_admin(texto, foto, ancora="#instagram")
     except Exception as exc:
         logger.error("Erro ao publicar o carrossel '%s' do Instagram: %s", slot, exc)
         db.registrar_disparo("Instagram", False, f"Erro ao publicar '{slot}': {exc}")

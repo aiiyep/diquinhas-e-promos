@@ -23,6 +23,7 @@ import requests
 from database.historico_ofertas import STATUS_WHATSAPP, HistoricoDB
 from orquestrador import instagram
 from painel.logs import MemoriaLogHandler
+from publishers import instagram_api
 from publishers.whatsapp import percentual_desconto, montar_texto_whatsapp
 
 logger = logging.getLogger("diquinhas_e_promos.painel")
@@ -161,6 +162,7 @@ def montar_instagram(db: HistoricoDB) -> dict[str, Any]:
     return {
         "posts": posts,
         "horarios": [f"{h:02d}:{m:02d}" for _, h, m in instagram.horarios()],
+        "api_conectada": instagram_api.configurado(),
     }
 
 
