@@ -1,4 +1,5 @@
 from datetime import datetime
+from html import escape
 from io import BytesIO
 from pathlib import Path
 
@@ -25,6 +26,7 @@ def _c(i, preco, de=None, nota=None, titulo=None):
 def _sem_gemini(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.delenv("INSTAGRAM_HORARIOS", raising=False)
+    monkeypatch.setenv("META_MIDIA_URL", "")  # API do Instagram desligada, salvo nos testes dela
 
 
 # ---------------------------------------------------------------- seleção
@@ -182,6 +184,26 @@ def test_publicar_do_horario(db, monkeypatch):
     db.atualizar_post_instagram(pid, "aprovado")
     instagram.publicar_do_horario(db, "top5", agora)
     assert publicados == [pid]
+
+
+def test_aprovado_sem_api_avisa_no_privado_com_capa_e_legenda(db):
+    agora = datetime(2026, 11, 2, 21, 0, tzinfo=instagram._TZ)
+    pid = instagram.preparar_do_horario(db, "top5", agora)
+    db.atualizar_post_instagram(pid, "aprovado")
+
+    avisos = instagram.publicar_do_horario(db, "top5", agora)
+    (instrucoes, capa), (legenda, sem_foto) = avisos
+    assert "<b>Instagram 21:00: hora de postar</b>" in instrucoes and "Top do dia" in instrucoes
+    assert "não está conectada, então ele não saiu sozinho" in instrucoes and capa.name == "00.jpg" and capa.is_file()
+    post = db.post_instagram(pid)
+    assert sem_foto is None and legenda == escape(post["legenda"])
+    assert post["status"] == "aprovado"  # continua no painel até "Marquei como publicado"
+
+
+def test_pendente_que_expira_nao_gera_aviso_de_postar(db):
+    agora = datetime(2026, 11, 2, 21, 0, tzinfo=instagram._TZ)
+    instagram.preparar_do_horario(db, "top5", agora)
+    assert instagram.publicar_do_horario(db, "top5", agora) == []
 
 
 def test_sem_aprovacao_nada_sai_nem_com_a_antiga_chave_auto(db, monkeypatch):
@@ -407,3 +429,46 @@ def test_preparar_dica_com_achadinho(db, monkeypatch):
     assert "Esponja de Maquiagem Gota: R$ 9,90 (era R$ 19,90, 50% OFF)" in post["legenda"]
     assert "#publi" in post["legenda"]
     assert db.titulos_instagram_recentes("dica") == [post["titulo"]]
+
+
+# ---------------------------------------------------------------- API da Meta
+
+
+@pytest.fixture
+def api_configurada(monkeypatch):
+    monkeypatch.setenv("META_ACCESS_TOKEN", "token-teste")
+    monkeypatch.setenv("META_IG_USER_ID", "1784100")
+    monkeypatch.setenv("META_MIDIA_URL", "https://bot.exemplo.ts.net:8443/")
+
+
+def test_aprovado_com_api_publica_e_nao_avisa(db, api_configurada, monkeypatch):
+    from publishers import instagram_api
+
+    agora = datetime(2026, 11, 2, 21, 0, tzinfo=instagram._TZ)
+    pid = instagram.preparar_do_horario(db, "top5", agora)
+    db.atualizar_post_instagram(pid, "aprovado")
+    enviados = []
+    monkeypatch.setattr(instagram_api, "publicar", lambda urls, legenda: enviados.append((urls, legenda)) or "MID9")
+
+    assert instagram.publicar_do_horario(db, "top5", agora) == []
+    post = db.post_instagram(pid)
+    assert post["status"] == "publicado" and post["ig_media_id"] == "MID9"
+    urls, legenda = enviados[0]
+    assert len(urls) == post["n_cards"] and legenda == post["legenda"]
+    assert urls[0] == f"https://bot.exemplo.ts.net:8443/ig/{pid}/{instagram_api.assinatura(pid)}/00.jpg"
+
+
+def test_meta_recusa_vira_falhou_e_avisa_com_o_motivo(db, api_configurada, monkeypatch):
+    from publishers import instagram_api
+
+    agora = datetime(2026, 11, 2, 21, 0, tzinfo=instagram._TZ)
+    pid = instagram.preparar_do_horario(db, "top5", agora)
+    db.atualizar_post_instagram(pid, "aprovado")
+
+    def recusa(urls, legenda):
+        raise instagram_api.ErroInstagram("Meta recusou (9004): imagem inacessível")
+
+    monkeypatch.setattr(instagram_api, "publicar", recusa)
+    (instrucoes, _), _ = instagram.publicar_do_horario(db, "top5", agora)
+    assert db.post_instagram(pid)["status"] == "falhou"
+    assert "falhou (Meta recusou (9004): imagem inacessível)" in instrucoes

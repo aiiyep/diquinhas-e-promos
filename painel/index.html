@@ -506,6 +506,7 @@
     descartado: ["", "descartado"], expirado: ["bad", "expirou"], falhou: ["bad", "falhou"],
   };
   let igAssinatura = "";
+  let igApi = false;
   let igOcupado = false;
 
   async function acaoInstagram(id, acao) {
@@ -531,7 +532,8 @@
   }
 
   function itemInstagram(post) {
-    const [classe, rotulo] = IG_STATUS[post.status] || ["", post.status];
+    let [classe, rotulo] = IG_STATUS[post.status] || ["", post.status];
+    if (post.status === "aprovado" && !igApi) [classe, rotulo] = ["warn", "aprovado · publique à mão"];
     const topo = el("div", { class: "ig-topo" },
       el("span", { class: `tag ${classe}`, text: rotulo }),
       el("span", { class: "tag", text: post.agendado }),
@@ -591,9 +593,15 @@
     igAssinatura = dados.posts.map((p) => `${p.id}:${p.status}`).join(",");
     const pendentes = dados.posts.filter((p) => p.status === "pendente").length;
     $("ig-info").textContent = pendentes ? `${pendentes} aguardando aprovação` : "";
-    $("ig-dica").textContent = `O bot monta cada post 1h antes de ${dados.horarios.join(", ")} e avisa no ` +
-      "Telegram 30 min antes se ainda não estiver aprovado. Só o que você aprovar vai ao ar. Por enquanto, " +
-      "publique com Compartilhar imagens → Instagram, cole a legenda e toque em \"Marquei como publicado\".";
+    igApi = !!dados.api_conectada;
+    const inicio = `O bot monta cada post 1h antes de ${dados.horarios.join(", ")} e avisa no ` +
+      "Telegram 30 min antes se ainda não estiver aprovado. ";
+    $("ig-dica").textContent = inicio + (igApi
+      ? "O que você aprovar sai sozinho no Instagram no horário. Se a Meta recusar, o post fica como " +
+        "\"falhou\" e o bot manda a capa e a legenda no seu privado para publicar à mão."
+      : "Atenção: aprovar ainda não publica sozinho (a API do Instagram não está conectada). No horário, " +
+        "o bot manda a capa e a legenda no seu privado do Telegram: publique com Compartilhar imagens → " +
+        "Instagram, cole a legenda e toque em \"Marquei como publicado\".");
     $("ig-lista").replaceChildren(...(dados.posts.length ? dados.posts.map(itemInstagram) :
       [el("div", { class: "vazio", text: "Nenhum carrossel ainda. O primeiro sai 1h antes do próximo horário." })]));
   }
