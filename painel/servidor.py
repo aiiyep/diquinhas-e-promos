@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 from pathlib import Path
+import re
 import threading
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlsplit
@@ -137,6 +138,29 @@ _ACOES_INSTAGRAM = {
     "publicado": (("pendente", "aprovado", "expirado", "falhou"), "publicado"),  # publicado à mão
 }
 
+# Legenda editada no painel: limites do próprio Instagram
+MAX_LEGENDA = 2200
+MAX_HASHTAGS = 30
+_STATUS_EDITAVEIS = ("pendente", "aprovado", "expirado", "falhou")
+# Basta a hashtag (#publi ou #publicidade, como o CONAR aceita); a frase do AVISO_PUBLI é opcional
+_TEM_PUBLI = re.compile(r"#publi(cidade)?\b", re.IGNORECASE)
+
+
+def validar_legenda(nova: Any, atual: Optional[str]) -> tuple[Optional[str], str]:
+    """Devolve (legenda pronta, "") ou (None, motivo da recusa)."""
+    if not isinstance(nova, str):
+        return None, "legenda inválida"
+    nova = nova.replace("\r\n", "\n").strip()
+    if not nova:
+        return None, "a legenda não pode ficar vazia"
+    if len(nova) > MAX_LEGENDA:
+        return None, f"a legenda tem {len(nova)} caracteres; o Instagram aceita até {MAX_LEGENDA}"
+    if nova.count("#") > MAX_HASHTAGS:
+        return None, f"o Instagram aceita no máximo {MAX_HASHTAGS} hashtags"
+    if _TEM_PUBLI.search(atual or "") and not _TEM_PUBLI.search(nova):
+        return None, "mantenha o #publi na legenda (regra do CONAR para links de afiliado)"
+    return nova, ""
+
 
 def montar_instagram(db: HistoricoDB) -> dict[str, Any]:
     posts = []
@@ -179,7 +203,7 @@ def caminho_card(db: HistoricoDB, post_id: str, indice: str) -> Optional[Path]:
     return arquivo if arquivo.is_file() else None
 
 
-def acao_instagram(db: HistoricoDB, post_id: Any, acao: Any) -> tuple[int, str]:
+def acao_instagram(db: HistoricoDB, post_id: Any, acao: Any, legenda: Any = None) -> tuple[int, str]:
     """Aplica a ação do painel. Devolve (status HTTP, mensagem de erro ou "")."""
     try:
         post = db.post_instagram(int(post_id))
@@ -190,6 +214,14 @@ def acao_instagram(db: HistoricoDB, post_id: Any, acao: Any) -> tuple[int, str]:
     if acao == "regerar":
         if instagram.regerar_post(db, post["id"]) is None:
             return 409, "não deu para montar outro (faltam produtos inéditos?)"
+        return 200, ""
+    if acao == "legenda":
+        if post["status"] not in _STATUS_EDITAVEIS:
+            return 409, f"carrossel está '{post['status']}'"
+        nova, erro = validar_legenda(legenda, post["legenda"])
+        if nova is None:
+            return 400, erro
+        db.atualizar_legenda_instagram(post["id"], nova)
         return 200, ""
     if acao not in _ACOES_INSTAGRAM:
         return 400, "ação inválida"
@@ -243,14 +275,14 @@ def iniciar_painel(
                 self._responder(403, "application/json; charset=utf-8", b'{"erro": "proibido"}')
                 return
             try:
-                tamanho = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                tamanho = min(int(self.headers.get("Content-Length") or 0), 64_000)  # legenda de até 2.200 caracteres com emojis
                 dados = json.loads(self.rfile.read(tamanho) or b"{}")
                 if not isinstance(dados, dict):
                     raise ValueError
             except ValueError:
                 dados = {}
             if caminho == "/api/instagram/acao":
-                codigo, erro = acao_instagram(db, dados.get("id"), dados.get("acao"))
+                codigo, erro = acao_instagram(db, dados.get("id"), dados.get("acao"), dados.get("legenda"))
                 if codigo != 200:
                     corpo = json.dumps({"erro": erro}, ensure_ascii=False).encode("utf-8")
                     self._responder(codigo, "application/json; charset=utf-8", corpo)

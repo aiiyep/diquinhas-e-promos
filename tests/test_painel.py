@@ -208,3 +208,49 @@ def test_instagram_lista_card_e_acoes(painel_ig):
 
     _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "publicado"})
     assert db.post_instagram(pid)["status"] == "publicado"
+
+
+def test_instagram_editar_legenda(painel_ig):
+    url, db, pid = painel_ig
+    nova = "Legenda nova ✨\r\n\r\nContém links de afiliado. #publi  "
+    depois = _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "legenda", "legenda": nova})
+    assert depois["posts"][0]["legenda"] == "Legenda nova ✨\n\nContém links de afiliado. #publi"
+    assert depois["posts"][0]["status"] == "pendente"  # editar não aprova nem desaprova
+
+    # aprovado continua aprovado depois de editar
+    _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "aprovar"})
+    _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "legenda", "legenda": "Outra\nContém links de afiliado. #publi"})
+    assert db.post_instagram(pid)["status"] == "aprovado"
+    assert db.post_instagram(pid)["legenda"] == "Outra\nContém links de afiliado. #publi"
+
+    casos = [
+        {"legenda": "   "},  # vazia
+        {"legenda": "x" * 2201},  # passa do limite do Instagram
+        {"legenda": "Contém links de afiliado. #publi " + "#a " * 30},  # mais de 30 hashtags
+        {"legenda": "Sem o aviso do CONAR"},  # tirou o #publi que já estava
+        {"legenda": "Vou #publicar amanhã"},  # #publicar não é #publi
+        {},  # sem legenda
+    ]
+    for extra in casos:
+        with pytest.raises(urllib.error.HTTPError) as erro:
+            _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "legenda", **extra})
+        assert erro.value.code == 400
+    assert db.post_instagram(pid)["legenda"] == "Outra\nContém links de afiliado. #publi"
+
+    # post já publicado não muda mais
+    _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "publicado"})
+    with pytest.raises(urllib.error.HTTPError) as erro:
+        _post(f"{url}/api/instagram/acao", {"id": pid, "acao": "legenda", "legenda": "tarde demais #publi"})
+    assert erro.value.code == 409
+
+
+def test_legenda_sem_aviso_original_pode_ficar_sem_aviso():
+    from painel.servidor import validar_legenda
+
+    # só a hashtag já basta, sem a frase "Contém links de afiliado."
+    atual = "Texto\n\nContém links de afiliado. #publi"
+    assert validar_legenda("Texto curto #publi", atual) == ("Texto curto #publi", "")
+    assert validar_legenda("Texto #Publicidade", atual)[0] == "Texto #Publicidade"
+
+    # Dica sem achadinhos não tem link de afiliado, então não leva #publi
+    assert validar_legenda("Só a dica", "Dica de skincare") == ("Só a dica", "")
