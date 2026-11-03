@@ -366,6 +366,13 @@ class HistoricoDB:
             conn.commit()
         return cursor.rowcount > 0
 
+    def atualizar_legenda_instagram(self, post_id: int, legenda: str) -> bool:
+        """Troca só a legenda (editada no painel), sem mexer no status. True se o post existia."""
+        with self._conectar() as conn:
+            cursor = conn.execute("UPDATE instagram_posts SET legenda = ? WHERE id = ?;", (legenda, int(post_id)))
+            conn.commit()
+        return cursor.rowcount > 0
+
     def ultimos_disparos(self, limite: int = 30) -> list[dict[str, Any]]:
         query = "SELECT nicho, data, sucesso, detalhe FROM disparos ORDER BY id DESC LIMIT ?;"
         with self._conectar() as conn:

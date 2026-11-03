@@ -103,6 +103,11 @@
   .ig-cards img { width: 120px; height: 150px; object-fit: cover; border-radius: 6px; display: block; background: var(--bg); }
   .ig-legenda { font: 12.5px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 8px; padding: 8px; margin: 0; max-height: 8em; overflow: auto; }
   .ig-erro { color: var(--bad); font-size: 13px; }
+  .ig-editor { display: flex; flex-direction: column; gap: 6px; }
+  .ig-editor textarea { font: 13px/1.45 var(--mono); color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; padding: 8px; width: 100%; box-sizing: border-box; min-height: 14em; resize: vertical; }
+  .ig-editor .rodape { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .ig-editor .conta { color: var(--muted); font-size: 12px; margin-right: auto; }
+  .ig-editor .conta.estourou { color: var(--bad); font-weight: 600; }
   .wa-dica { color: var(--muted); font-size: 13px; margin: -4px 0 12px; }
   .wa-lista { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
   .wa-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -114,7 +119,7 @@
   .wa-titulo { font-weight: 500; overflow-wrap: anywhere; }
   .wa-texto { font: 12.5px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 8px; padding: 8px; margin: 0; max-height: 9.5em; overflow: auto; }
   .wa-botoes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
-  .wa-botoes .principal { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .wa-botoes .principal, .ig-editor .principal { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   .wa-botoes a { font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; }
   .wa-mais { margin-top: 12px; }
   @media (max-width: 600px) {
@@ -508,12 +513,14 @@
   let igAssinatura = "";
   let igApi = false;
   let igOcupado = false;
+  let igEditando = 0;  // legendas abertas para edição: a atualização automática espera
+  const IG_MAX_LEGENDA = 2200;
 
-  async function acaoInstagram(id, acao) {
+  async function acaoInstagram(id, acao, extra = {}) {
     const resp = await fetch("/api/instagram/acao", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Painel": "1" },
-      body: JSON.stringify({ id, acao }),
+      body: JSON.stringify({ id, acao, ...extra }),
     });
     const dados = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(dados.erro || `HTTP ${resp.status}`);
@@ -546,10 +553,47 @@
       cards.append(el("a", { href: url, target: "_blank", rel: "noopener" },
         el("img", { src: url, alt: `Card ${n + 1}`, loading: "lazy" })));
     }
+    const legenda = el("pre", { class: "ig-legenda", text: post.legenda || "" });
     const item = el("div", { class: `ig-item${["descartado", "expirado"].includes(post.status) ? " apagado" : ""}` },
-      topo, el("div", { class: "ig-titulo", text: post.titulo || "" }), cards,
-      el("pre", { class: "ig-legenda", text: post.legenda || "" }));
+      topo, el("div", { class: "ig-titulo", text: post.titulo || "" }), cards, legenda);
     if (post.erro) item.append(el("div", { class: "ig-erro", text: post.erro }));
+
+    const abrirEditor = () => {
+      igEditando++;
+      const area = el("textarea", { "aria-label": "Legenda do post", spellcheck: "true" });
+      area.value = post.legenda || "";
+      const conta = el("span", { class: "conta" });
+      const contar = () => {
+        const n = area.value.trim().length;
+        conta.textContent = `${n}/${IG_MAX_LEGENDA} caracteres`;
+        conta.classList.toggle("estourou", n > IG_MAX_LEGENDA);
+      };
+      area.addEventListener("input", contar);
+      contar();
+      const erro = el("div", { class: "ig-erro" });
+      const salvar = el("button", { class: "principal", text: "Salvar legenda" });
+      const cancelar = el("button", { text: "Cancelar" });
+      const editor = el("div", { class: "ig-editor" }, area, el("div", { class: "rodape" }, conta, cancelar, salvar), erro);
+      const fechar = () => { igEditando = Math.max(0, igEditando - 1); editor.replaceWith(legenda); botoes.style.display = ""; };
+      cancelar.addEventListener("click", fechar);
+      salvar.addEventListener("click", async () => {
+        if (igOcupado) return;
+        igOcupado = true;
+        salvar.textContent = "Salvando…";
+        erro.textContent = "";
+        try {
+          igEditando = Math.max(0, igEditando - 1);
+          await acaoInstagram(post.id, "legenda", { legenda: area.value });
+        } catch (e) {
+          igEditando++;
+          erro.textContent = `Não salvou: ${e.message}`;
+          salvar.textContent = "Salvar legenda";
+        } finally { igOcupado = false; }
+      });
+      legenda.replaceWith(editor);
+      botoes.style.display = "none";  // .wa-botoes usa display:flex, que venceria o atributo hidden
+      area.focus();
+    };
 
     const botoes = el("div", { class: "wa-botoes" });
     const botao = (texto, acao, principal = false) => {
@@ -577,6 +621,9 @@
         });
         botoes.append(share);
       }
+      const editar = el("button", { text: "Editar legenda" });
+      editar.addEventListener("click", () => { if (!igOcupado) abrirEditor(); });
+      botoes.append(editar);
       const copiar = el("button", { text: "Copiar legenda" });
       copiar.addEventListener("click", async () => {
         try { await copiarTexto(post.legenda); piscar(copiar, "Copiada!", "Copiar legenda"); }
@@ -589,8 +636,11 @@
     return item;
   }
 
+  const assinaturaIg = (posts) => posts.map((p) => `${p.id}:${p.status}:${p.legenda || ""}`).join("\n");
+
   function renderInstagram(dados) {
-    igAssinatura = dados.posts.map((p) => `${p.id}:${p.status}`).join(",");
+    igAssinatura = assinaturaIg(dados.posts);
+    igEditando = 0;
     const pendentes = dados.posts.filter((p) => p.status === "pendente").length;
     $("ig-info").textContent = pendentes ? `${pendentes} aguardando aprovação` : "";
     igApi = !!dados.api_conectada;
@@ -607,12 +657,12 @@
   }
 
   async function atualizarInstagram() {
-    if (igOcupado) return;
+    if (igOcupado || igEditando) return;
     try {
       const resp = await fetch("/api/instagram", { cache: "no-store" });
-      if (!resp.ok) return;
+      if (!resp.ok || igEditando) return;
       const dados = await resp.json();
-      if (dados.posts.map((p) => `${p.id}:${p.status}`).join(",") !== igAssinatura || !igAssinatura) renderInstagram(dados);
+      if (assinaturaIg(dados.posts) !== igAssinatura || !igAssinatura) renderInstagram(dados);
     } catch { /* o aviso de conexão já aparece no topo */ }
   }
 
