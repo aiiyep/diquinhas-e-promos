@@ -123,6 +123,35 @@
   .wa-botoes .principal, .ig-editor .principal { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   .wa-botoes a { font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; }
   .wa-mais { margin-top: 12px; }
+  /* menu de abas: fixo no topo, rola de lado no celular */
+  .menu {
+    position: sticky; top: 0; z-index: 10; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
+    margin: 0 -16px 16px; padding: 8px 16px; background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+  }
+  .menu::-webkit-scrollbar { display: none; }
+  .menu a {
+    flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 8px;
+    color: var(--muted); font-weight: 500; text-decoration: none; white-space: nowrap;
+  }
+  .menu a:hover { color: var(--text); background: var(--surface); }
+  .menu a[aria-current="page"] { color: var(--accent); background: var(--surface); box-shadow: inset 0 -2px 0 var(--accent); }
+  .menu .contador {
+    min-width: 20px; padding: 0 6px; border-radius: 10px; background: var(--accent); color: #fff;
+    font-size: 12px; font-weight: 700; line-height: 20px; text-align: center;
+  }
+  .menu .contador:empty { display: none; }
+  #nav-falhas { background: var(--bad); }
+  .aba[hidden] { display: none !important; }
+  .pendencias { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .pendencia {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px; text-decoration: none;
+    color: var(--text); background: var(--warn-bg); border: 1px solid transparent;
+  }
+  .pendencia:hover { border-color: var(--warn); }
+  .pendencia b { font-size: 22px; color: var(--warn); }
+  .pendencia.ok { background: var(--surface); border-color: var(--border); color: var(--muted); }
+  .pendencia.ok b { color: var(--ok); }
   @media (max-width: 600px) {
     .log { grid-template-columns: 1fr; gap: 0; }
     .log .q, .log .n { display: inline; }
@@ -137,6 +166,23 @@
     <button id="pausar" aria-pressed="false">Pausar atualização</button>
   </header>
 
+  <nav class="menu" aria-label="Seções do painel">
+    <a href="#inicio">Início</a>
+    <a href="#instagram">Instagram <span class="contador" id="nav-ig"></span></a>
+    <a href="#reels">Reels <span class="contador" id="nav-rl"></span></a>
+    <a href="#whatsapp">WhatsApp <span class="contador" id="nav-wa"></span></a>
+    <a href="#disparos" title="Falhas de hoje">Disparos <span class="contador" id="nav-falhas"></span></a>
+    <a href="#postagens">Postagens</a>
+    <a href="#log">Log</a>
+  </nav>
+
+  <div class="aba" id="inicio">
+  <div class="pendencias">
+    <a class="pendencia" id="pend-ig" href="#instagram"><b>–</b><span>posts do Instagram para aprovar</span></a>
+    <a class="pendencia" id="pend-rl" href="#reels"><b>–</b><span>Reels para postar</span></a>
+    <a class="pendencia" id="pend-wa" href="#whatsapp"><b>–</b><span>ofertas na fila do WhatsApp</span></a>
+  </div>
+
   <div class="cards">
     <div class="card"><div class="rotulo">No ar há</div><div class="valor" id="no-ar">–</div></div>
     <div class="card"><div class="rotulo">Próximo disparo</div><div class="valor" id="prox-em">–</div><div class="extra" id="prox-nicho"></div></div>
@@ -144,44 +190,45 @@
     <div class="card" id="card-falhas"><div class="rotulo">Falhas hoje</div><div class="valor" id="falhas-hoje">–</div></div>
     <div class="card"><div class="rotulo">No WhatsApp hoje</div><div class="valor" id="wa-hoje">–</div><div class="extra" id="wa-fila-total"></div></div>
   </div>
+  </div>
 
-  <section id="instagram">
+  <section class="aba" id="instagram">
     <h2>Instagram <span class="wa-info" id="ig-info"></span></h2>
     <p class="wa-dica" id="ig-dica"></p>
     <div class="ig-lista" id="ig-lista"></div>
   </section>
 
-  <section id="reels">
+  <section class="aba" id="reels">
     <h2>Reels <span class="wa-info" id="rl-info"></span></h2>
     <p class="wa-dica" id="rl-dica"></p>
     <div class="ig-lista" id="rl-lista"></div>
     <div class="wa-botoes wa-mais"><button id="rl-gerar">Gerar Reels agora</button></div>
   </section>
 
-  <section id="whatsapp">
+  <section class="aba" id="whatsapp">
     <h2>Canal do WhatsApp <span class="wa-info" id="wa-info"></span></h2>
     <p class="wa-dica" id="wa-dica">Postagens das últimas 48h, do maior desconto para o menor. Copie o texto, segure a foto para salvar e cole os dois no canal.</p>
     <div class="wa-lista" id="wa-lista"></div>
     <button class="wa-mais" id="wa-mais" hidden>Mostrar todas</button>
   </section>
 
-  <div class="grid2">
+  <div class="grid2 aba" id="disparos">
     <section>
       <h2>Próximos disparos</h2>
       <div class="scroll"><table><thead><tr><th>Quando</th><th>Nicho</th><th class="num">Em</th></tr></thead><tbody id="proximos"></tbody></table></div>
     </section>
     <section>
       <h2>Últimos disparos</h2>
-      <div class="scroll"><table><thead><tr><th>Quando</th><th>Nicho</th><th>Resultado</th></tr></thead><tbody id="disparos"></tbody></table></div>
+      <div class="scroll"><table><thead><tr><th>Quando</th><th>Nicho</th><th>Resultado</th></tr></thead><tbody id="tb-disparos"></tbody></table></div>
     </section>
   </div>
 
-  <section>
+  <section class="aba" id="postagens">
     <h2>Últimas postagens</h2>
-    <div class="scroll"><table><thead><tr><th>Quando</th><th>Nicho</th><th>Produto</th><th class="num">Preço</th><th>Loja</th></tr></thead><tbody id="postagens"></tbody></table></div>
+    <div class="scroll"><table><thead><tr><th>Quando</th><th>Nicho</th><th>Produto</th><th class="num">Preço</th><th>Loja</th></tr></thead><tbody id="tb-postagens"></tbody></table></div>
   </section>
 
-  <section>
+  <section class="aba" id="log">
     <h2>
       Log
       <span class="filtros">
@@ -202,6 +249,29 @@
   let ultimoStatus = null;
 
   const $ = (id) => document.getElementById(id);
+
+  // ------------------------------------------------------------ abas
+  const ABAS = ["inicio", "instagram", "reels", "whatsapp", "disparos", "postagens", "log"];
+  function mostrarAba() {
+    const atual = ABAS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "inicio";
+    for (const aba of ABAS) $(aba).hidden = aba !== atual;
+    for (const link of document.querySelectorAll(".menu a")) {
+      const ativo = link.getAttribute("href") === `#${atual}`;
+      if (ativo) { link.setAttribute("aria-current", "page"); link.scrollIntoView({ block: "nearest", inline: "center" }); }
+      else link.removeAttribute("aria-current");
+    }
+    window.scrollTo(0, 0);
+  }
+  window.addEventListener("hashchange", mostrarAba);
+
+  function contador(chave, n, texto) {
+    $(`nav-${chave}`).textContent = n ? String(n) : "";
+    const card = $(`pend-${chave}`);
+    if (!card) return;
+    card.querySelector("b").textContent = String(n);
+    card.querySelector("span").textContent = texto;
+    card.classList.toggle("ok", !n);
+  }
 
   function el(tag, props = {}, ...filhos) {
     const node = document.createElement(tag);
@@ -260,6 +330,7 @@
     const ult = s.resumo.ultimo_disparo;
     $("ultimo").textContent = ult ? `último: ${ult.nicho} às ${ult.data.split(" ")[1]} ${ult.sucesso ? "✓" : "✗"}` : "nenhum disparo ainda";
     $("falhas-hoje").textContent = s.resumo.falhas_hoje;
+    $("nav-falhas").textContent = s.resumo.falhas_hoje ? String(s.resumo.falhas_hoje) : "";
     $("card-falhas").classList.toggle("ruim", s.resumo.falhas_hoje > 0);
 
     preencher($("proximos"), s.proximos.slice(0, 12).map((p) => [
@@ -268,13 +339,13 @@
       el("td", { class: "num", text: duracao(p.em_segundos) }),
     ]), 3, "Nenhum disparo agendado.");
 
-    preencher($("disparos"), s.disparos.map((d) => [
+    preencher($("tb-disparos"), s.disparos.map((d) => [
       el("td", { class: "quando", text: d.data }),
       el("td", { text: d.nicho }),
       el("td", {}, el("span", { class: `tag ${d.sucesso ? "ok" : "bad"}`, text: d.sucesso ? "publicou" : "não publicou" }), " ", d.detalhe || ""),
     ]), 3, "Nenhum disparo registrado ainda.");
 
-    preencher($("postagens"), s.postagens.map((p) => {
+    preencher($("tb-postagens"), s.postagens.map((p) => {
       const nome = p.titulo || p.id_produto;
       const produto = p.link && /^https?:\/\//.test(p.link)
         ? el("a", { href: p.link, target: "_blank", rel: "noopener noreferrer", text: nome })
@@ -481,6 +552,7 @@
     $("wa-hoje").textContent = dados.postados_hoje;
     $("wa-fila-total").textContent = `${waFila.length} na fila`;
     $("wa-info").textContent = `${waFila.length} na fila`;
+    contador("wa", waFila.length, waFila.length === 1 ? "oferta na fila do WhatsApp" : "ofertas na fila do WhatsApp");
     const visiveis = waTodas ? waFila : waFila.slice(0, WA_VISIVEIS);
     $("wa-lista").replaceChildren(...(visiveis.length ? visiveis.map(itemFila) :
       [el("div", { class: "vazio", text: "Nada na fila: tudo das últimas 48h já foi postado ou pulado." })]));
@@ -651,6 +723,7 @@
     igEditando = 0;
     const pendentes = dados.posts.filter((p) => p.status === "pendente").length;
     $("ig-info").textContent = pendentes ? `${pendentes} aguardando aprovação` : "";
+    contador("ig", pendentes, pendentes === 1 ? "post do Instagram para aprovar" : "posts do Instagram para aprovar");
     igApi = !!dados.api_conectada;
     const inicio = `O bot monta cada post 1h antes de ${dados.horarios.join(", ")} e avisa no ` +
       "Telegram 30 min antes se ainda não estiver aprovado. ";
@@ -674,6 +747,7 @@
     } catch { /* o aviso de conexão já aparece no topo */ }
   }
 
+  mostrarAba();
   atualizarInstagram();
   setInterval(() => { if (!pausado) atualizarInstagram(); }, 60000);
 
@@ -766,6 +840,7 @@
     rlAssinatura = dados.reels.map((r) => `${r.id}:${r.status}`).join(",");
     const pendentes = dados.reels.filter((r) => r.status === "pendente").length;
     $("rl-info").textContent = pendentes ? `${pendentes} para postar` : "";
+    contador("rl", pendentes, pendentes === 1 ? "Reels para postar" : "Reels para postar");
     $("rl-dica").textContent = `O bot monta um Reels (${dados.agenda}) e avisa no Telegram. Toque em ` +
       "Compartilhar vídeo → Instagram (Reels), escolha uma música em alta, cole a legenda e poste " +
       "(melhor entre 18h e 21h). Depois, \"Marquei como postado\".";
