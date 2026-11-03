@@ -34,6 +34,8 @@ STATUS_WHATSAPP = ("postado", "pulado")
 # Ciclo de um carrossel do Instagram: pendente → aprovado → publicado. Sem aprovação até a hora
 # vira "expirado"; "substituido" é o que foi trocado por "Gerar outro" no painel.
 STATUS_INSTAGRAM = ("pendente", "aprovado", "publicado", "descartado", "expirado", "falhou", "substituido")
+# Reels (o usuário posta pelo app): pendente → postado; ou descartado / substituido ("Gerar outro")
+STATUS_REELS = ("pendente", "postado", "descartado", "substituido")
 # Status em que os produtos do carrossel contam como "já usados" no Instagram
 _STATUS_INSTAGRAM_OCUPA = ("pendente", "aprovado", "publicado", "falhou")
 
@@ -111,6 +113,24 @@ class HistoricoDB:
             colunas_ig = {row["name"] for row in conn.execute("PRAGMA table_info(instagram_posts);")}
             if "formato" not in colunas_ig:
                 conn.execute("ALTER TABLE instagram_posts ADD COLUMN formato TEXT;")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dia TEXT NOT NULL,
+                    criado_em DATETIME NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pendente',
+                    formato TEXT NOT NULL,
+                    tema TEXT NOT NULL,
+                    titulo TEXT,
+                    legenda TEXT,
+                    produtos TEXT NOT NULL,
+                    pasta TEXT,
+                    segundos REAL,
+                    status_em DATETIME
+                );
+                """
+            )
             conn.commit()
 
     def foi_postado_recentemente(self, id_produto: str, dias_limite: int = 14) -> bool:
@@ -372,6 +392,76 @@ class HistoricoDB:
             cursor = conn.execute("UPDATE instagram_posts SET legenda = ? WHERE id = ?;", (legenda, int(post_id)))
             conn.commit()
         return cursor.rowcount > 0
+
+    # ------------------------------------------------------------ Reels (semiautomático)
+
+    def criar_reel(
+        self, dia: str, formato: str, tema: str, titulo: str, legenda: str, produtos: list[dict[str, Any]],
+        pasta: str, segundos: float,
+    ) -> int:
+        agora = _agora().isoformat(timespec="seconds")
+        with self._conectar() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO reels (dia, criado_em, status, formato, tema, titulo, legenda, produtos, pasta, segundos,
+                                   status_em)
+                VALUES (?, ?, 'pendente', ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (dia, agora, formato, tema, titulo, legenda, json.dumps(produtos, ensure_ascii=False), pasta,
+                 segundos, agora),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    @staticmethod
+    def _reel(row: sqlite3.Row) -> dict[str, Any]:
+        reel = dict(row)
+        reel["produtos"] = json.loads(reel["produtos"] or "[]")
+        return reel
+
+    def reel(self, reel_id: int) -> Optional[dict[str, Any]]:
+        with self._conectar() as conn:
+            row = conn.execute("SELECT * FROM reels WHERE id = ?;", (int(reel_id),)).fetchone()
+        return self._reel(row) if row else None
+
+    def reels(self, limite: int = 8) -> list[dict[str, Any]]:
+        """Reels mais recentes, menos os substituídos por "Gerar outro"."""
+        query = "SELECT * FROM reels WHERE status != 'substituido' ORDER BY id DESC LIMIT ?;"
+        with self._conectar() as conn:
+            return [self._reel(row) for row in conn.execute(query, (limite,))]
+
+    def reels_do_dia(self, dia: str) -> list[dict[str, Any]]:
+        query = "SELECT * FROM reels WHERE dia = ? AND status != 'substituido' ORDER BY id DESC;"
+        with self._conectar() as conn:
+            return [self._reel(row) for row in conn.execute(query, (dia,))]
+
+    def atualizar_reel(self, reel_id: int, status: str) -> bool:
+        if status not in STATUS_REELS:
+            raise ValueError(f"Status de Reels inválido: {status!r}")
+        with self._conectar() as conn:
+            cursor = conn.execute(
+                "UPDATE reels SET status = ?, status_em = ? WHERE id = ?;",
+                (status, _agora().isoformat(timespec="seconds"), int(reel_id)),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def produtos_usados_reels(self, dias: int = 21) -> dict[str, str]:
+        """{id: título} dos produtos de Reels pendentes ou postados nos últimos `dias`."""
+        desde = (_agora() - timedelta(days=dias)).isoformat(timespec="seconds")
+        query = "SELECT produtos FROM reels WHERE criado_em >= ? AND status IN ('pendente', 'postado');"
+        usados: dict[str, str] = {}
+        with self._conectar() as conn:
+            for row in conn.execute(query, (desde,)):
+                for p in json.loads(row["produtos"] or "[]"):
+                    usados[str(p.get("id"))] = str(p.get("titulo") or "")
+        return usados
+
+    def temas_reels_recentes(self, limite: int = 12) -> list[str]:
+        """Temas dos últimos Reels (o mais recente primeiro), para girar os temas."""
+        query = "SELECT tema FROM reels WHERE status != 'substituido' ORDER BY id DESC LIMIT ?;"
+        with self._conectar() as conn:
+            return [row["tema"] for row in conn.execute(query, (limite,))]
 
     def ultimos_disparos(self, limite: int = 30) -> list[dict[str, Any]]:
         query = "SELECT nicho, data, sucesso, detalhe FROM disparos ORDER BY id DESC LIMIT ?;"

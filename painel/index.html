@@ -103,6 +103,7 @@
   .ig-cards img { width: 120px; height: 150px; object-fit: cover; border-radius: 6px; display: block; background: var(--bg); }
   .ig-legenda { font: 12.5px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 8px; padding: 8px; margin: 0; max-height: 8em; overflow: auto; }
   .ig-erro { color: var(--bad); font-size: 13px; }
+  .rl-video { width: 100%; max-width: 270px; aspect-ratio: 9 / 16; border-radius: 10px; background: var(--bg); display: block; margin: 0 auto; }
   .ig-editor { display: flex; flex-direction: column; gap: 6px; }
   .ig-editor textarea { font: 13px/1.45 var(--mono); color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; padding: 8px; width: 100%; box-sizing: border-box; min-height: 14em; resize: vertical; }
   .ig-editor .rodape { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -148,6 +149,13 @@
     <h2>Instagram <span class="wa-info" id="ig-info"></span></h2>
     <p class="wa-dica" id="ig-dica"></p>
     <div class="ig-lista" id="ig-lista"></div>
+  </section>
+
+  <section id="reels">
+    <h2>Reels <span class="wa-info" id="rl-info"></span></h2>
+    <p class="wa-dica" id="rl-dica"></p>
+    <div class="ig-lista" id="rl-lista"></div>
+    <div class="wa-botoes wa-mais"><button id="rl-gerar">Gerar Reels agora</button></div>
   </section>
 
   <section id="whatsapp">
@@ -668,6 +676,130 @@
 
   atualizarInstagram();
   setInterval(() => { if (!pausado) atualizarInstagram(); }, 60000);
+
+  // ------------------------------------------------------------ Reels (semiautomático)
+  const RL_STATUS = {
+    pendente: ["warn", "esperando você postar"], postado: ["ok", "postado"], descartado: ["", "descartado"],
+  };
+  let rlAssinatura = "";
+  let rlOcupado = false;
+
+  async function acaoReels(id, acao) {
+    const resp = await fetch("/api/reels/acao", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Painel": "1" },
+      body: JSON.stringify({ id, acao }),
+    });
+    const dados = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(dados.erro || `HTTP ${resp.status}`);
+    renderReels(dados);
+  }
+
+  async function arquivoVideo(reel) {
+    const r = await fetch(`/api/reels/video?id=${reel.id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return new File([await r.blob()], `reels-${reel.id}.mp4`, { type: "video/mp4" });
+  }
+
+  function itemReels(reel) {
+    const [classe, rotulo] = RL_STATUS[reel.status] || ["", reel.status];
+    const topo = el("div", { class: "ig-topo" },
+      el("span", { class: `tag ${classe}`, text: rotulo }),
+      el("span", { class: "tag", text: reel.dia }),
+      el("span", { class: "tag warn", text: reel.tema }),
+      el("span", { class: "tag", text: `${Math.round(reel.segundos || 0)}s · sem música` }));
+    const item = el("div", { class: `ig-item${reel.status === "descartado" ? " apagado" : ""}` },
+      topo, el("div", { class: "ig-titulo", text: reel.titulo || "" }));
+    if (reel.tem_video) {
+      item.append(el("video", {
+        class: "rl-video", src: `/api/reels/video?id=${reel.id}`, poster: `/api/reels/capa?id=${reel.id}`,
+        controls: "", playsinline: "", muted: "", loop: "", preload: "none",
+      }));
+    }
+    item.append(el("pre", { class: "ig-legenda", text: reel.legenda || "" }));
+
+    const botoes = el("div", { class: "wa-botoes" });
+    const botao = (texto, acao, principal = false) => {
+      const b = el("button", { class: principal ? "principal" : "", text: texto });
+      b.addEventListener("click", async () => {
+        if (rlOcupado) return;
+        if (acao === "descartar" && !confirm("Descartar este Reels?")) return;
+        rlOcupado = true;
+        b.textContent = acao === "regerar" ? "Montando… (até 2 min)" : "…";
+        try { await acaoReels(reel.id, acao); } catch (e) { b.textContent = `erro: ${e.message}`; }
+        finally { rlOcupado = false; }
+      });
+      return b;
+    };
+    if (reel.status === "pendente" && reel.tem_video) {
+      if (PODE_COMPARTILHAR) {
+        const share = el("button", { class: "principal", text: "Compartilhar vídeo" });
+        share.addEventListener("click", async () => {
+          try {
+            const dados = { files: [await arquivoVideo(reel)] };
+            if (!navigator.canShare(dados)) throw new Error("o navegador não compartilha vídeo");
+            await navigator.share(dados);
+          } catch (e) {
+            if (e.name !== "AbortError") piscar(share, `falhou: ${e.message}`, "Compartilhar vídeo");
+          }
+        });
+        botoes.append(share);
+      }
+      botoes.append(el("a", { href: `/api/reels/video?id=${reel.id}`, download: `reels-${reel.id}.mp4`, text: "Baixar vídeo" }));
+    }
+    if (reel.status === "pendente") {
+      const copiar = el("button", { text: "Copiar legenda" });
+      copiar.addEventListener("click", async () => {
+        try { await copiarTexto(reel.legenda); piscar(copiar, "Copiada!", "Copiar legenda"); }
+        catch { piscar(copiar, "falhou", "Copiar legenda"); }
+      });
+      botoes.append(copiar, botao("Marquei como postado", "postado"), botao("Gerar outro", "regerar"),
+        botao("Descartar", "descartar"));
+    } else if (reel.status === "descartado") {
+      botoes.append(botao("Gerar outro", "regerar"));
+    }
+    if (botoes.children.length) item.append(botoes);
+    return item;
+  }
+
+  function renderReels(dados) {
+    rlAssinatura = dados.reels.map((r) => `${r.id}:${r.status}`).join(",");
+    const pendentes = dados.reels.filter((r) => r.status === "pendente").length;
+    $("rl-info").textContent = pendentes ? `${pendentes} para postar` : "";
+    $("rl-dica").textContent = `O bot monta um Reels (${dados.agenda}) e avisa no Telegram. Toque em ` +
+      "Compartilhar vídeo → Instagram (Reels), escolha uma música em alta, cole a legenda e poste " +
+      "(melhor entre 18h e 21h). Depois, \"Marquei como postado\".";
+    $("rl-lista").replaceChildren(...(dados.reels.length ? dados.reels.map(itemReels) :
+      [el("div", { class: "vazio", text: "Nenhum Reels ainda. Toque em \"Gerar Reels agora\" ou espere o próximo dia." })]));
+    const gerar = $("rl-gerar");
+    gerar.disabled = !!dados.gerando;
+    gerar.textContent = dados.gerando ? "Montando um Reels…" : "Gerar Reels agora";
+  }
+
+  async function atualizarReels() {
+    if (rlOcupado) return;
+    try {
+      const resp = await fetch("/api/reels", { cache: "no-store" });
+      if (!resp.ok) return;
+      const dados = await resp.json();
+      const assinatura = dados.reels.map((r) => `${r.id}:${r.status}`).join(",");
+      if (assinatura !== rlAssinatura || !rlAssinatura || dados.gerando !== $("rl-gerar").disabled) renderReels(dados);
+    } catch { /* o aviso de conexão já aparece no topo */ }
+  }
+
+  $("rl-gerar").addEventListener("click", async () => {
+    const b = $("rl-gerar");
+    if (rlOcupado) return;
+    rlOcupado = true;
+    b.disabled = true;
+    b.textContent = "Montando… (até 2 min)";
+    try { await acaoReels(null, "gerar"); }
+    catch (e) { b.disabled = false; b.textContent = `erro: ${e.message}`; }
+    finally { rlOcupado = false; }
+  });
+
+  atualizarReels();
+  setInterval(() => { if (!pausado) atualizarReels(); }, 60000);
 </script>
 </body>
 </html>

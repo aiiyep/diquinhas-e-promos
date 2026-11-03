@@ -22,7 +22,7 @@ from apscheduler.schedulers.base import BaseScheduler
 import requests
 
 from database.historico_ofertas import STATUS_WHATSAPP, HistoricoDB
-from orquestrador import instagram
+from orquestrador import instagram, reels
 from painel.logs import MemoriaLogHandler
 from publishers import instagram_api
 from publishers.whatsapp import percentual_desconto, montar_texto_whatsapp
@@ -79,7 +79,7 @@ def montar_status(
         quando = quando.astimezone(_TZ)
         proximos.append(
             {
-                "nicho": "Instagram" if job.id.startswith("instagram_") else (job.args[0] if job.args else ""),
+                "nicho": "Instagram" if job.id.startswith(("instagram_", "reels_")) else (job.args[0] if job.args else ""),
                 "nome": job.name,
                 "quando": quando.strftime("%d/%m %H:%M"),
                 "em_segundos": max(0, int((quando - agora).total_seconds())),
@@ -232,6 +232,89 @@ def acao_instagram(db: HistoricoDB, post_id: Any, acao: Any, legenda: Any = None
     return 200, ""
 
 
+def montar_reels(db: HistoricoDB) -> dict[str, Any]:
+    lista = []
+    for r in db.reels(6):
+        tema = reels.TEMAS_POR_CHAVE.get(r["tema"])
+        lista.append(
+            {
+                "id": r["id"],
+                "dia": datetime.fromisoformat(r["dia"]).strftime("%d/%m"),
+                "status": r["status"],
+                "formato": reels.NOMES_FORMATOS.get(r["formato"], r["formato"]),
+                "tema": tema.rotulo if tema else r["tema"],
+                "titulo": r["titulo"],
+                "legenda": r["legenda"],
+                "segundos": r["segundos"],
+                "produtos": [p.get("nome") for p in r["produtos"]],
+                "tem_video": bool(caminho_reel(db, r["id"], "video.mp4")),
+            }
+        )
+    hora, minuto = reels.horario()
+    return {
+        "reels": lista,
+        "agenda": f"{', '.join(reels.dias_configurados())} às {hora:02d}:{minuto:02d}",
+        "gerando": reels.gerando(),
+    }
+
+
+def caminho_reel(db: HistoricoDB, reel_id: Any, nome: str) -> Optional[Path]:
+    """`video.mp4` ou `capa.jpg` de um Reels, só dentro da pasta gravada para ele."""
+    if nome not in ("video.mp4", "capa.jpg"):
+        return None
+    try:
+        reel = db.reel(int(reel_id))
+    except (TypeError, ValueError):
+        return None
+    if not reel or not reel["pasta"]:
+        return None
+    arquivo = Path(reel["pasta"]) / nome
+    return arquivo if arquivo.is_file() else None
+
+
+def acao_reels(db: HistoricoDB, reel_id: Any, acao: Any) -> tuple[int, str]:
+    """postado / descartar / regerar um Reels, ou "gerar" um novo para hoje."""
+    if acao == "gerar":
+        if reels.gerando():
+            return 409, "já estou montando um Reels, espere terminar"
+        return (200, "") if reels.preparar_reel(db) else (409, "não deu para montar (faltam produtos com foto?)")
+    try:
+        reel = db.reel(int(reel_id))
+    except (TypeError, ValueError):
+        return 400, "id inválido"
+    if not reel:
+        return 404, "Reels não encontrado"
+    if acao == "regerar":
+        if reels.gerando():
+            return 409, "já estou montando um Reels, espere terminar"
+        if reel["status"] not in ("pendente", "descartado"):
+            return 409, f"Reels está '{reel['status']}'"
+        return (200, "") if reels.regerar(db, reel["id"]) else (409, "não deu para montar outro (faltam produtos?)")
+    destinos = {"postado": "postado", "descartar": "descartado"}
+    if acao not in destinos:
+        return 400, "ação inválida"
+    if reel["status"] != "pendente":
+        return 409, f"Reels está '{reel['status']}'"
+    db.atualizar_reel(reel["id"], destinos[acao])
+    return 200, ""
+
+
+def _intervalo(cabecalho: Optional[str], tamanho: int) -> Optional[tuple[int, int]]:
+    """Primeiro intervalo de um cabeçalho `Range: bytes=a-b` (o Safari só toca vídeo com Range)."""
+    if not cabecalho or not cabecalho.startswith("bytes="):
+        return None
+    inicio_txt, _, fim_txt = cabecalho[6:].split(",")[0].strip().partition("-")
+    try:
+        if inicio_txt:
+            inicio = int(inicio_txt)
+            fim = min(int(fim_txt), tamanho - 1) if fim_txt else tamanho - 1
+        else:  # "bytes=-500": os últimos 500 bytes
+            inicio, fim = max(0, tamanho - int(fim_txt)), tamanho - 1
+    except ValueError:
+        return None
+    return (inicio, fim) if 0 <= inicio <= fim < tamanho else None
+
+
 def iniciar_painel(
     scheduler: BaseScheduler,
     db: HistoricoDB,
@@ -262,12 +345,23 @@ def iniciar_painel(
                     self._responder(404, "text/plain; charset=utf-8", "Card não encontrado".encode("utf-8"))
                 else:
                     self._responder(200, "image/jpeg", arquivo.read_bytes(), cache="private, max-age=600")
+            elif caminho == "/api/reels":
+                self._json(lambda: montar_reels(db))
+            elif caminho in ("/api/reels/video", "/api/reels/capa"):
+                nome = "video.mp4" if caminho.endswith("video") else "capa.jpg"
+                arquivo = caminho_reel(db, (parse_qs(urlsplit(self.path).query).get("id") or [""])[0], nome)
+                if arquivo is None:
+                    self._responder(404, "text/plain; charset=utf-8", "Arquivo não encontrado".encode("utf-8"))
+                elif nome == "capa.jpg":
+                    self._responder(200, "image/jpeg", arquivo.read_bytes(), cache="private, max-age=600")
+                else:
+                    self._video(arquivo)
             else:
                 self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
 
         def do_POST(self) -> None:  # noqa: N802
             caminho = self.path.split("?")[0]
-            if caminho not in ("/api/whatsapp/marcar", "/api/instagram/acao"):
+            if caminho not in ("/api/whatsapp/marcar", "/api/instagram/acao", "/api/reels/acao"):
                 self._responder(404, "text/plain; charset=utf-8", "Não encontrado".encode("utf-8"))
                 return
             # Cabeçalho próprio: um formulário de outro site não consegue enviá-lo sem CORS
@@ -288,6 +382,14 @@ def iniciar_painel(
                     self._responder(codigo, "application/json; charset=utf-8", corpo)
                 else:
                     self._json(lambda: montar_instagram(db))
+                return
+            if caminho == "/api/reels/acao":
+                codigo, erro = acao_reels(db, dados.get("id"), dados.get("acao"))
+                if codigo != 200:
+                    corpo = json.dumps({"erro": erro}, ensure_ascii=False).encode("utf-8")
+                    self._responder(codigo, "application/json; charset=utf-8", corpo)
+                else:
+                    self._json(lambda: montar_reels(db))
                 return
             id_produto, status = str(dados.get("id") or ""), dados.get("status")
             if not id_produto or status not in STATUS_WHATSAPP:
@@ -312,6 +414,23 @@ def iniciar_painel(
                 self._responder(502, "text/plain; charset=utf-8", "Falha ao baixar a foto".encode("utf-8"))
                 return
             self._responder(200, tipo, corpo, cache="private, max-age=3600")
+
+        def _video(self, arquivo: Path) -> None:
+            tamanho = arquivo.stat().st_size
+            intervalo = _intervalo(self.headers.get("Range"), tamanho)
+            inicio, fim = intervalo or (0, tamanho - 1)
+            with arquivo.open("rb") as f:
+                f.seek(inicio)
+                corpo = f.read(fim - inicio + 1)
+            self.send_response(206 if intervalo else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            if intervalo:
+                self.send_header("Content-Range", f"bytes {inicio}-{fim}/{tamanho}")
+            self.send_header("Content-Length", str(len(corpo)))
+            self.send_header("Cache-Control", "private, max-age=600")
+            self.end_headers()
+            self.wfile.write(corpo)
 
         def _json(self, montar: Any) -> None:
             try:
