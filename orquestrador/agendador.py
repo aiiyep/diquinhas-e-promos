@@ -42,7 +42,7 @@ from extractors.mercadolivre import (
 from extractors.filtros import eh_produto_masculino
 from extractors.shopee import ShopeeExtractor
 from formatters.promo_formatter import PromoFormatter
-from orquestrador import instagram
+from orquestrador import instagram, reels
 from publishers.telegram_avisos import avisar_admin
 from publishers.telegram_publisher import publish_product_to_telegram
 
@@ -536,6 +536,27 @@ def _registrar_jobs_instagram(target_scheduler: AsyncIOScheduler) -> None:
         )
 
 
+async def preparar_reels() -> None:
+    """Nos dias de Reels: monta o vídeo, deixa no painel e avisa no privado do Telegram."""
+    try:
+        _, texto, capa = await asyncio.to_thread(reels.preparar_do_dia, db)
+        await avisar_admin(texto, capa, ancora="#reels")
+    except Exception as exc:
+        logger.error("Erro ao preparar o Reels: %s", exc)
+        db.registrar_disparo("Reels", False, f"Erro ao preparar o Reels: {exc}")
+
+
+def _registrar_job_reels(target_scheduler: AsyncIOScheduler) -> None:
+    dias = reels.dias_configurados()
+    hora, minuto = reels.horario()
+    target_scheduler.add_job(
+        preparar_reels, trigger="cron", day_of_week=",".join(reels.DIAS_SEMANA[d] for d in dias),
+        hour=hora, minute=minuto, id="reels_preparar",
+        name=f"REELS - montar o vídeo ({', '.join(dias)} {hora:02d}:{minuto:02d})",
+        replace_existing=True, misfire_grace_time=3600,
+    )
+
+
 def configurar_agendador(sched: Optional[AsyncIOScheduler] = None) -> AsyncIOScheduler:
     """
     Registra os Sprints da tabela `BLOCOS` no AsyncIOScheduler usando o gatilho `cron`
@@ -557,6 +578,8 @@ def configurar_agendador(sched: Optional[AsyncIOScheduler] = None) -> AsyncIOSch
         )
     if instagram.instagram_ativo():
         _registrar_jobs_instagram(target_scheduler)
+    if reels.reels_ativo():
+        _registrar_job_reels(target_scheduler)
 
     logger.info(
         "Agendador configurado com %d jobs CRON no fuso '%s'.",
