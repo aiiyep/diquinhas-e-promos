@@ -123,6 +123,9 @@
   .wa-botoes .principal, .ig-editor .principal { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   .wa-botoes a { font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; }
   .wa-mais { margin-top: 12px; }
+  .wa-dia { grid-column: 1 / -1; font-weight: 600; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 6px 0 0; border-bottom: 1px solid var(--border); }
+  .wa-dia:first-child { padding-top: 0; }
+  .wa-dia.hoje { color: var(--accent); border-color: var(--accent); }
   /* menu de abas: fixo no topo, rola de lado no celular */
   .menu {
     position: sticky; top: 0; z-index: 10; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
@@ -206,8 +209,14 @@
   </section>
 
   <section class="aba" id="whatsapp">
-    <h2>Canal do WhatsApp <span class="wa-info" id="wa-info"></span></h2>
-    <p class="wa-dica" id="wa-dica">Postagens das últimas 48h, do maior desconto para o menor. Copie o texto, segure a foto para salvar e cole os dois no canal.</p>
+    <h2>
+      Canal do WhatsApp <span class="wa-info" id="wa-info"></span>
+      <span class="filtros">
+        <button data-wa-ordem="recentes" aria-pressed="true">Mais recentes</button>
+        <button data-wa-ordem="desconto" aria-pressed="false">Maior desconto</button>
+      </span>
+    </h2>
+    <p class="wa-dica" id="wa-dica">Copie o texto, segure a foto para salvar e cole os dois no canal.</p>
     <div class="wa-lista" id="wa-lista"></div>
     <button class="wa-mais" id="wa-mais" hidden>Mostrar todas</button>
   </section>
@@ -395,6 +404,23 @@
   let waFila = [];
   let waTodas = false;
   let waAssinatura = "";
+  let waHoje = "";
+  let waOrdem = "recentes";
+  try { if (localStorage.getItem("waOrdem") === "desconto") waOrdem = "desconto"; } catch { /* sem storage */ }
+
+  // "2026-11-04T10:30:00" -> "Hoje" / "Ontem" / "Segunda, 02/11"
+  function rotuloDia(dia) {
+    if (!dia) return "Sem data";
+    if (dia === waHoje) return "Hoje";
+    const [a, m, d] = dia.split("-").map(Number);
+    const data = new Date(Date.UTC(a, m - 1, d));
+    if (waHoje) {
+      const [ha, hm, hd] = waHoje.split("-").map(Number);
+      if (Date.UTC(ha, hm - 1, hd) - data.getTime() === 86400000) return "Ontem";
+    }
+    const semana = data.toLocaleDateString("pt-BR", { weekday: "long", timeZone: "UTC" });
+    return `${semana.split("-")[0]}, ${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}`;
+  }
   // Muda quando entra/sai produto OU quando o texto muda (ex.: deploy que encurtou os links)
   const assinaturaFila = (fila) => JSON.stringify(fila.map((p) => [p.id, p.texto]));
 
@@ -548,14 +574,30 @@
 
   function renderFila(dados) {
     waFila = dados.fila;
+    if (dados.hoje) waHoje = dados.hoje;
     waAssinatura = assinaturaFila(waFila);
     $("wa-hoje").textContent = dados.postados_hoje;
     $("wa-fila-total").textContent = `${waFila.length} na fila`;
     $("wa-info").textContent = `${waFila.length} na fila`;
     contador("wa", waFila.length, waFila.length === 1 ? "oferta na fila do WhatsApp" : "ofertas na fila do WhatsApp");
-    const visiveis = waTodas ? waFila : waFila.slice(0, WA_VISIVEIS);
-    $("wa-lista").replaceChildren(...(visiveis.length ? visiveis.map(itemFila) :
+    // A API manda do maior desconto para o menor; "Mais recentes" reordena aqui e separa por dia
+    const ordenada = waOrdem === "recentes"
+      ? [...waFila].sort((a, b) => (b.data || "").localeCompare(a.data || ""))
+      : waFila;
+    const visiveis = waTodas ? ordenada : ordenada.slice(0, WA_VISIVEIS);
+    const nos = [];
+    let diaAtual = null;
+    for (const p of visiveis) {
+      const dia = (p.data || "").slice(0, 10);
+      if (waOrdem === "recentes" && dia !== diaAtual) {
+        diaAtual = dia;
+        nos.push(el("div", { class: `wa-dia${dia === waHoje ? " hoje" : ""}`, text: rotuloDia(dia) }));
+      }
+      nos.push(itemFila(p));
+    }
+    $("wa-lista").replaceChildren(...(nos.length ? nos :
       [el("div", { class: "vazio", text: "Nada na fila: tudo das últimas 48h já foi postado ou pulado." })]));
+    for (const b of document.querySelectorAll("[data-wa-ordem]")) b.setAttribute("aria-pressed", String(b.dataset.waOrdem === waOrdem));
     $("wa-mais").hidden = waFila.length <= WA_VISIVEIS;
     $("wa-mais").textContent = waTodas ? "Mostrar menos" : `Mostrar todas (${waFila.length})`;
   }
@@ -572,15 +614,22 @@
   }
 
   $("wa-mais").addEventListener("click", () => { waTodas = !waTodas; renderFila({ fila: waFila, postados_hoje: $("wa-hoje").textContent }); });
+  document.querySelectorAll("[data-wa-ordem]").forEach((b) => b.addEventListener("click", () => {
+    waOrdem = b.dataset.waOrdem;
+    try { localStorage.setItem("waOrdem", waOrdem); } catch { /* sem storage */ }
+    renderFila({ fila: waFila, postados_hoje: $("wa-hoje").textContent });
+  }));
 
   atualizar();
   setInterval(atualizar, 10000);
   if (PODE_COMPARTILHAR) {
-    $("wa-dica").textContent = "Postagens das últimas 48h, do maior desconto para o menor. " +
+    $("wa-dica").textContent = "Postagens das últimas 48h. " +
       "Toque em Compartilhar, escolha o WhatsApp e o canal: foto e texto vão juntos.";
   } else if (PODE_COPIAR_FOTO) {
-    $("wa-dica").textContent = "Postagens das últimas 48h, do maior desconto para o menor. " +
+    $("wa-dica").textContent = "Postagens das últimas 48h. " +
       "Copie a foto e cole no canal, depois copie o texto e cole como legenda.";
+  } else {
+    $("wa-dica").textContent = "Postagens das últimas 48h. Copie o texto, segure a foto para salvar e cole os dois no canal.";
   }
   atualizarFila();
   setInterval(() => { if (!pausado) atualizarFila(); }, 60000);

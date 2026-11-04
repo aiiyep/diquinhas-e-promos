@@ -119,6 +119,7 @@ def montar_fila_whatsapp(db: HistoricoDB) -> dict[str, Any]:
                 "id": post["id_produto"],
                 "nicho": post["nicho"],
                 "quando": _formatar_data_db(post["data_envio"]),
+                "data": str(post["data_envio"] or ""),  # ISO, para ordenar e agrupar por dia
                 "titulo": post["titulo"],
                 "loja": post["loja"],
                 "imagem_url": post["imagem_url"],
@@ -127,7 +128,11 @@ def montar_fila_whatsapp(db: HistoricoDB) -> dict[str, Any]:
                 "texto": montar_texto_whatsapp(post),
             }
         )
-    return {"fila": fila, "postados_hoje": db.resumo_do_dia()["whatsapp_hoje"]}
+    return {
+        "fila": fila,
+        "postados_hoje": db.resumo_do_dia()["whatsapp_hoje"],
+        "hoje": datetime.now(_TZ).date().isoformat(),  # dia em São Paulo, para "Hoje"/"Ontem"
+    }
 
 
 # Ações do painel sobre um carrossel e de quais status cada uma parte

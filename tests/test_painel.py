@@ -79,9 +79,11 @@ def test_fila_whatsapp_e_marcar(painel):
     assert item["id"] == "MLB1" and item["nicho"] == "Moda"
     assert item["texto"].startswith("🔥 *Vestido <b>Midi</b>*")
     assert "R$ 89,90" in item["texto"] and "https://x.com" in item["texto"]
+    # Data crua (ISO) e o dia de hoje em São Paulo, para o painel ordenar e separar por dia
+    assert item["data"][:10] == dados["hoje"]
 
     depois = _post(f"{painel}/api/whatsapp/marcar", {"id": "MLB1", "status": "postado"})
-    assert depois == {"fila": [], "postados_hoje": 1}
+    assert depois["fila"] == [] and depois["postados_hoje"] == 1
 
 
 def test_marcar_whatsapp_rejeita_pedidos_invalidos(painel):
