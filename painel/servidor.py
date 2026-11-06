@@ -145,7 +145,8 @@ _ACOES_INSTAGRAM = {
 
 # Legenda editada no painel: limites do próprio Instagram
 MAX_LEGENDA = 2200
-MAX_HASHTAGS = 30
+MAX_HASHTAGS = 5  # limite do Instagram desde dez/2025 (contando o #publi)
+_HASHTAG = re.compile(r"(?<![\w#])#\w+")
 _STATUS_EDITAVEIS = ("pendente", "aprovado", "expirado", "falhou")
 # Basta a hashtag (#publi ou #publicidade, como o CONAR aceita); a frase do AVISO_PUBLI é opcional
 _TEM_PUBLI = re.compile(r"#publi(cidade)?\b", re.IGNORECASE)
@@ -160,8 +161,8 @@ def validar_legenda(nova: Any, atual: Optional[str]) -> tuple[Optional[str], str
         return None, "a legenda não pode ficar vazia"
     if len(nova) > MAX_LEGENDA:
         return None, f"a legenda tem {len(nova)} caracteres; o Instagram aceita até {MAX_LEGENDA}"
-    if nova.count("#") > MAX_HASHTAGS:
-        return None, f"o Instagram aceita no máximo {MAX_HASHTAGS} hashtags"
+    if (qtd := len(_HASHTAG.findall(nova))) > MAX_HASHTAGS:
+        return None, f"a legenda tem {qtd} hashtags; o Instagram aceita no máximo {MAX_HASHTAGS} (contando o #publi)"
     if _TEM_PUBLI.search(atual or "") and not _TEM_PUBLI.search(nova):
         return None, "mantenha o #publi na legenda (regra do CONAR para links de afiliado)"
     return nova, ""

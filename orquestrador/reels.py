@@ -108,7 +108,8 @@ _PERFUME = Passo("Perfume", ("perfume", "body splash", "colonia", "eau de parfum
 _CORPO = Passo("Corpo", ("hidratante corporal", "locao hidratante", "oleo corporal", "esfoliante corporal",
                          "manteiga corporal", "creme hidratante", "body lotion"), ("facial", "maos"))
 
-_TAGS = ("#achadinhos", "#achadinhosdabeleza", "#beleza", "#reels")
+# O Instagram aceita até 5 hashtags por post/Reels (desde dez/2025): 3 do tema + #achadinhos + #publi
+_TAGS = ("#achadinhos",)
 
 TEMAS: tuple[Tema, ...] = (
     Tema(
@@ -124,7 +125,7 @@ TEMAS: tuple[Tema, ...] = (
             Passo("Cabelo", ("perfume capilar", "body splash capilar", "leave-in", "leave in", "shampoo")),
             Passo("Perfume", ("perfume", "body splash", "colonia", "eau de parfum", "eau de toilette"), ("capilar",)),
         ),
-        ("#rotinadebeleza", "#cheirosa", "#autocuidado", "#perfume") + _TAGS,
+        ("#cheirosa", "#rotinadebeleza", "#perfume") + _TAGS,
     ),
     Tema(
         "cabelo", "rotina", "Cabelo sem frizz",
@@ -138,7 +139,7 @@ TEMAS: tuple[Tema, ...] = (
             Passo("Proteger", ("protetor termico",)),
             Passo("Brilho", ("oleo capilar", "serum capilar", "oleo reparador")),
         ),
-        ("#cabelo", "#rotinacapilar", "#cabelosemfrizz", "#cuidadoscomocabelo") + _TAGS,
+        ("#cabelo", "#rotinacapilar", "#cabelosemfrizz") + _TAGS,
     ),
     Tema(
         "skincare", "rotina", "Skincare simples",
@@ -149,7 +150,7 @@ TEMAS: tuple[Tema, ...] = (
             Passo("Hidratar", ("hidratante facial", "creme facial", "gel creme")),
             Passo("Proteger", ("protetor solar",)),
         ),
-        ("#skincare", "#skincarebrasil", "#rotinadeskincare", "#pele") + _TAGS,
+        ("#skincare", "#skincarebrasil", "#rotinadeskincare") + _TAGS,
         aviso_saude=True,
     ),
     Tema(
@@ -163,7 +164,7 @@ TEMAS: tuple[Tema, ...] = (
             Passo("Boca", ("batom", "gloss", "lip tint", "lip oil", "balm labial")),
             Passo("Fixar", ("fixador de maquiagem", "po compacto", "po solto", "bruma fixadora")),
         ),
-        ("#maquiagem", "#makedodia", "#makerapida", "#make") + _TAGS,
+        ("#maquiagem", "#makedodia", "#make") + _TAGS,
     ),
     Tema(
         "unhas", "rotina", "Unhas em casa",
@@ -174,14 +175,14 @@ TEMAS: tuple[Tema, ...] = (
             Passo("Cor", ("esmalte",), ("removedor", "base", "top coat")),
             Passo("Finalizar", ("top coat", "extra brilho", "secante")),
         ),
-        ("#unhas", "#unhasdecoradas", "#esmalte", "#unhasemcasa") + _TAGS,
+        ("#unhas", "#unhasdecoradas", "#esmalte") + _TAGS,
     ),
     Tema(
         "blackfriday", "sazonal", "Black Friday",
         ("Lista de Black Friday: coloca no carrinho JÁ", "Black Friday tá chegando: monta sua lista de beleza",
          "O que colocar no carrinho pra Black Friday"),
         (_MAKE, _SKIN, _CABELO, _PERFUME, _CORPO),
-        ("#blackfriday", "#blackfridaybeleza", "#listadecompras", "#promocao") + _TAGS,
+        ("#blackfriday", "#blackfridaybeleza", "#promocao") + _TAGS,
         maximo=5, prefixo_passo=False,
         chamada="As ofertas de Black Friday saem todo dia no nosso canal do WhatsApp: toca no link da bio!",
         fecho="📌 Salva pra não esquecer na hora de comprar.",
@@ -196,7 +197,7 @@ TEMAS: tuple[Tema, ...] = (
             Passo("Pra quem ama cabelo", _CABELO.termos, _CABELO.evitar),
             Passo("Pra quem ama se cuidar", _CORPO.termos, _CORPO.evitar),
         ),
-        ("#amigosecreto", "#presentedenatal", "#natal", "#presentes") + _TAGS,
+        ("#amigosecreto", "#presentedenatal", "#natal") + _TAGS,
         maximo=5, prefixo_passo=False,
         fecho="📌 Salva pra lembrar na hora do sorteio.",
     ),
@@ -220,7 +221,7 @@ TEMAS: tuple[Tema, ...] = (
             Passo("Blush", ("blush",)),
             Passo("Óleo capilar", ("oleo capilar", "oleo reparador")),
         ),
-        ("#issoouaquilo", "#qualvoceescolhe", "#maquiagem", "#skincare") + _TAGS,
+        ("#issoouaquilo", "#qualvoceescolhe", "#beleza") + _TAGS,
         minimo=2, maximo=3,
         chamada="Os links estão no nosso canal do WhatsApp: toca no link da bio!",
         fecho="Comenta sua combinação (ex.: 1, 2, 1) 👇",

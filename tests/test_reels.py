@@ -84,6 +84,13 @@ def test_dias_e_horario_invalidos_voltam_ao_padrao(monkeypatch):
     assert reels.dias_configurados() == ["ter", "sex"]
 
 
+def test_legenda_dos_reels_cabe_no_limite_de_hashtags():
+    for tema in reels.TEMAS:
+        legenda = reels._legenda(tema, "Gancho", ["1. Produto"])
+        assert legenda.count("#") <= 5, tema.chave  # o Instagram aceita até 5 (contando o #publi)
+        assert "#publi" in legenda
+
+
 def test_passo_respeita_termos_a_evitar():
     banho = reels.TEMAS_POR_CHAVE["cheirosa"].passos[0]
     assert banho.combina("Sabonete Líquido Corporal 400ml")
