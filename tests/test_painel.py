@@ -228,7 +228,7 @@ def test_instagram_editar_legenda(painel_ig):
     casos = [
         {"legenda": "   "},  # vazia
         {"legenda": "x" * 2201},  # passa do limite do Instagram
-        {"legenda": "Contém links de afiliado. #publi " + "#a " * 30},  # mais de 30 hashtags
+        {"legenda": "Contém links de afiliado. #publi #a #b #c #d #e"},  # 6 hashtags: o limite é 5
         {"legenda": "Sem o aviso do CONAR"},  # tirou o #publi que já estava
         {"legenda": "Vou #publicar amanhã"},  # #publicar não é #publi
         {},  # sem legenda
@@ -253,6 +253,10 @@ def test_legenda_sem_aviso_original_pode_ficar_sem_aviso():
     atual = "Texto\n\nContém links de afiliado. #publi"
     assert validar_legenda("Texto curto #publi", atual) == ("Texto curto #publi", "")
     assert validar_legenda("Texto #Publicidade", atual)[0] == "Texto #Publicidade"
+
+    # até 5 hashtags passam (contando o #publi); a 6ª é recusada
+    assert validar_legenda("Texto #a #b #c #d #publi", atual)[1] == ""
+    assert "6 hashtags" in validar_legenda("Texto #a #b #c #d #e #publi", atual)[1]
 
     # Dica sem achadinhos não tem link de afiliado, então não leva #publi
     assert validar_legenda("Só a dica", "Dica de skincare") == ("Só a dica", "")

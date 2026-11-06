@@ -25,7 +25,8 @@ from publishers.telegram_publisher import _format_brl
 logger = logging.getLogger("diquinhas_e_promos.instagram")
 
 LIMITE_LEGENDA = 2200  # limite do Instagram
-MAX_HASHTAGS = 12
+# O Instagram aceita até 5 hashtags por post (desde dez/2025); a 5ª é o #publi do AVISO_PUBLI
+MAX_HASHTAGS = 4
 HASHTAGS_PADRAO = (
     "#achadinhos", "#achadinhosdabeleza", "#beleza", "#maquiagem", "#skincare",
     "#promocao", "#ofertas", "#descontos", "#shopee", "#mercadolivre",
@@ -192,7 +193,7 @@ Responda em JSON:
 - nomes_curtos: um nome curto por produto, na mesma ordem, até 40 caracteres, usando SÓ palavras
   que já estão no título do produto (pode tirar palavras, não pode trocar nem acrescentar).
 - abertura: 1 ou 2 frases para abrir a legenda, até 220 caracteres, pode ter 1 ou 2 emojis.
-- hashtags: 6 a 8 hashtags em português do nicho, sem acento.
+- hashtags: 4 hashtags em português do nicho, sem acento (o Instagram aceita no máximo 5 e a 5ª é o #publi).
 
 Regras: escreva em português correto, COM acentos (só as hashtags vão sem acento); não cite preços em reais; só use porcentagens que estão na lista; não prometa frete grátis,
 cupom, brinde, estoque acabando nem prazo ("só hoje"), porque não temos essa informação."""
@@ -401,7 +402,7 @@ Responda em JSON:
 - veredito: até 140 caracteres, começando com "Vale a pena se" ou "Vale a pena pra", falando do uso
   do produto (não só de nota ou desconto).
 - abertura: 1 ou 2 frases para a legenda, até 220 caracteres, com 1 ou 2 emojis.
-- hashtags: 6 a 8, em português, sem acento."""
+- hashtags: 4, em português, sem acento (o Instagram aceita no máximo 5 e a 5ª é o #publi)."""
 
 
 def gerar_vale_a_pena(produto: dict[str, Any], conferido_em: datetime, tentativas: int = 2) -> Optional[TextosValeAPena]:
@@ -598,7 +599,7 @@ Responda em JSON:
 - busca: 2 a 4 tipos de produto que ajudam nesse assunto, em 1 ou 2 palavras (ex.: "protetor solar",
   "esponja", "sérum"), para procurar achadinhos.
 - abertura: 1 ou 2 frases para a legenda, até 200 caracteres, com 1 ou 2 emojis.
-- hashtags: 6 a 8, em português, sem acento."""
+- hashtags: 4, em português, sem acento (o Instagram aceita no máximo 5 e a 5ª é o #publi)."""
 
 
 def tema_do_dia(dia_ordinal: int) -> tuple[str, EstiloDica]:

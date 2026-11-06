@@ -104,7 +104,7 @@ def test_textos_da_ia_sao_conferidos(monkeypatch):
         "subtitulo": "Com frete grátis",  # promessa que o bot não sabe
         "nomes_curtos": ["Po Compacto Glass", "Batom Vermelho Vult", "Kit 15 Pinceis"],
         "abertura": "Achei esses com até 64% OFF! 💖",
-        "hashtags": ["#Maquiagem", "beleza barata", "#achadinhos"],
+        "hashtags": ["#Maquiagem", "beleza barata", "#achadinhos", "#make", "#batom", "#base"],
     })
     t = gerar_textos("top5", PRODUTOS, AGORA)
     assert t.usou_ia
@@ -114,6 +114,7 @@ def test_textos_da_ia_sao_conferidos(monkeypatch):
     assert t.nomes[2] == "Kit 15 Pincéis"
     assert t.legenda.startswith("Achei esses com até 64% OFF! 💖")
     assert "#maquiagem #belezabarata #achadinhos" in t.legenda
+    assert t.legenda.count("#") == 5  # 4 do nicho + #publi: o limite do Instagram
     assert set(t.recusados) == {"titulo_capa", "subtitulo", "nome 2"}
 
 
