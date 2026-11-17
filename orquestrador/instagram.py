@@ -341,7 +341,7 @@ def _salvar(
         slot_chave, agendado_para, titulo, legenda, produtos, str(pasta), len(imagens), usou_ia, formato=formato
     )
     db.registrar_disparo("Instagram", True, f"{descricao} aguardando aprovação para {agendado_para:%H:%M}")
-    limpar_cards_antigos()
+    limpar_cards_antigos(referencia=agendado_para)
     return post_id
 
 
@@ -612,10 +612,16 @@ def preparar_do_horario(db: HistoricoDB, slot_chave: str, agora: Optional[dateti
     return preparar_post(db, slot_chave, agendado, agora=agora)
 
 
-def limpar_cards_antigos(dias: int = DIAS_GUARDAR_CARDS) -> None:
+def limpar_cards_antigos(dias: int = DIAS_GUARDAR_CARDS, referencia: Optional[datetime] = None) -> None:
+    """Apaga pastas de cards com mais de `dias` dias, contados a partir de `referencia` (padrão: agora).
+
+    Usar a data do post como referência garante que a pasta recém-criada nunca seja apagada,
+    mesmo quando o relógio do sistema e a data do post não batem (ex.: testes com data fixa).
+    """
     if not PASTA_CARDS.exists():
         return
-    corte = datetime.now(_TZ).replace(tzinfo=None) - timedelta(days=dias)
+    base = referencia if referencia is not None else datetime.now(_TZ)
+    corte = base.replace(tzinfo=None) - timedelta(days=dias)
     for pasta in PASTA_CARDS.iterdir():
         try:
             if pasta.is_dir() and datetime.strptime(pasta.name[:13], "%Y%m%d-%H%M") < corte:
