@@ -1,5 +1,9 @@
 # 🛍️ Diquinhas & Promos — Affiliate Bot
 
+[![Testes](https://github.com/aiiyep/diquinhas-e-promos/actions/workflows/tests.yml/badge.svg)](https://github.com/aiiyep/diquinhas-e-promos/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![pytest](https://img.shields.io/badge/pytest-130%2B%20testes-0A9EDC?logo=pytest&logoColor=white)
+
 Bot de afiliados que busca ofertas de beleza e moda no **Mercado Livre** e na **Shopee** e publica cada uma no tópico (thread) correspondente de um supergrupo do **Telegram**, em horários agendados.
 
 ---
@@ -78,10 +82,22 @@ Porta e ativação podem ser configuradas em `PAINEL_PORTA` e `PAINEL_ATIVO` no 
 
 ## 🧪 Testes
 
+O projeto tem uma suíte com **mais de 130 testes automatizados** em `pytest`, que roda no **GitHub Actions** a cada push e pull request ([`.github/workflows/tests.yml`](./.github/workflows/tests.yml)).
+
 ```bash
 pip install -r requirements-dev.txt
 pytest
 ```
+
+O que a suíte cobre:
+
+- **Regras de negócio:** agendamento dos blocos de horário, rotação de nichos, filtro de produtos e desconto real
+- **Deduplicação:** histórico em SQLite que impede repetir produto dentro da janela de dias
+- **Formatação:** links de afiliado e mensagens do Telegram e do Instagram
+- **Integrações isoladas com mocks:** Instagram (Graph API), Gemini e as lojas são simulados com `monkeypatch`, então os testes não dependem de rede nem de chave de API
+- **Painel web:** rotas e respostas do servidor
+
+> 🐞 **Bug encontrado pelos testes:** a limpeza de cards antigos usava o relógio do sistema, e não a data do post. Com o passar dos dias, os testes com data fixa começaram a falhar sozinhos, porque a pasta do post era apagada logo depois de criada. A correção passou a usar a data do post como referência, com testes de regressão em [`tests/test_limpeza_cards.py`](./tests/test_limpeza_cards.py).
 
 ## ➕ Adicionar um nicho
 
